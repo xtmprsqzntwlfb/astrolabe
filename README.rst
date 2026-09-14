@@ -5,7 +5,7 @@ astrolabe
 An OpenStack Horizon plugin that shows the **CLI and REST equivalents of what
 you just did in the dashboard**. Perform an admin action — create a flavor,
 delete a network — and Astrolabe records the equivalent ``openstack`` command
-and ``curl`` request, ready to copy into a script.
+and ``curl`` request, ready to copy into a script or download as one.
 
 It exists to shorten the gap between clicking through Horizon and automating
 the same work.
@@ -14,62 +14,91 @@ Design goals
 ============
 
 * **No backend.** No models, no migrations, no API endpoints, no daemons, no
-  extra runtime dependencies. The Python side is a rule table and one
-  ``TemplateView`` subclass.
-* **Django only.** No AngularJS. Horizon is moving toward removing Angular
-  altogether, so Astrolabe hooks the Django form path exclusively and will
-  outlive that removal.
-* **Logic in Python.** What to translate, and how, lives in
-  ``astrolabe/rules.py``. The JavaScript is a generic interpreter with no
-  knowledge of any particular panel.
-* **Encapsulated.** It adds no dashboard and no panel, and patches nothing in
-  Horizon. It contributes one JavaScript file and one header template.
-* **Admin only.** The header template gates on ``request.user.is_superuser``,
-  which openstack_auth derives from the operator's roles in the current scope.
-  Non-admins never get the marker, so the recorder never activates for them.
-* **Read-only, and offline.** Astrolabe calls no OpenStack API. It only reads
-  form values the operator has already submitted, and renders text.
+  extra runtime dependencies. Recorded entries live in the operator's own
+  Django session.
+* **Pure Python.** Not one line of JavaScript, and no ``<script>`` tag. The
+  recorder is a middleware and the display is a Django template. Horizon is
+  moving toward removing AngularJS altogether, and Astrolabe has nothing to
+  remove.
+* **Encapsulated.** It patches nothing in Horizon and touches no existing
+  dashboard. It adds one dashboard of its own, with one panel.
+* **Admin only.** Gated twice, server-side: the dashboard carries the same
+  admin permissions Horizon's own Admin dashboard uses, and the middleware
+  checks ``is_superuser`` before it records anything. A non-admin's actions are
+  never read, let alone stored.
+* **Read-only, and offline.** Astrolabe calls no OpenStack API. It reads form
+  values the operator has already submitted, and renders text.
 
 How it works
 ============
 
 Django Horizon submits its modal forms and its table row/batch actions as
-ordinary form submissions — ``horizon.modals.js`` delegates ``.modal form``
-submits through ``$.ajax``, and table actions post the table's own form. A
-single capturing ``submit`` listener therefore observes every create and delete
-the operator performs, together with the exact values they entered.
+ordinary POSTs. One middleware therefore observes every create and delete an
+admin performs, together with the exact values they entered.
+
+This is the same vantage point ``horizon.middleware.OperationLogMiddleware``
+uses — in-tree, enabled by a setting, and shipped in Horizon's default
+``MIDDLEWARE`` — and Astrolabe deliberately follows its shape: fetch the
+response first, then read ``request.POST``. That ordering matters. Reading POST
+before the view runs consumes the request body and breaks Horizon's file-upload
+forms.
 
 Each submission is matched against a rule table. **A submission that matches no
 rule is ignored and never stored** — Astrolabe only ever retains fields for the
-handful of forms it explicitly understands.
+handful of forms it explicitly understands::
 
-The rules themselves live in Python, in ``astrolabe/rules.py``. The header view
-serialises them to JSON, the template embeds them with Django's ``json_script``
-filter, and the JavaScript reads them from the page. Nothing is fetched at
-action time, and no endpoint exists to fetch from::
+    POST /admin/flavors/create/
+            │
+            ▼
+    middleware.py ──▶ translate.py ──▶ session  ──▶ panel
+                          ▲
+                       rules.py
 
-    rules.py  ──serialise──▶  header view  ──json_script──▶  <script> in page
-                                                                    │
-                                        astrolabe.js interpreter ◀──┘
+The rules live in Python, in ``astrolabe/rules.py``, which is pure data plus
+its own self-check. ``rules.validate()`` imports the Horizon form each rule
+targets and confirms the field names still exist, so a rename in a future
+Horizon release surfaces as a logged warning rather than a silently incomplete
+command. The check runs once, on the first submission a rule matches, and its
+failures are logged rather than raised.
 
-Keeping the rules in Python buys one thing JavaScript cannot have.
-``rules.validate()`` imports the Horizon form each rule targets and checks the
-field names still exist, so a rename in a future Horizon release surfaces as a
-logged warning on first render rather than a silently incomplete command. The
-check is deferred to first render (the dashboard modules are not reliably
-importable while Django is still assembling the app registry) and its failures
-are logged, never raised — a header section that throws costs the operator
-their navigation bar.
+``astrolabe/translate.py`` holds the interpreter that applies the rules. It
+knows nothing about any particular panel.
 
-On top of that, secret-looking field names are dropped before anything is read.
-``password``, ``secret``, ``token`` and ``credential`` match anywhere in the
-name (this is what catches Django's run-together ``csrfmiddlewaretoken``);
-``pass``, ``key`` and ``auth`` match only on word boundaries, so ``passthrough``
-and ``keystone_url`` survive. Names are split on camelCase first, so Nova's
+Recording outcomes
+------------------
+
+Because it runs after the view, the middleware sees whether Horizon actually
+accepted the action, which is something a browser-side recorder cannot know.
+Two signals:
+
+* **Status code.** Horizon redirects on success and re-renders the modal with
+  errors on failure. That covers both invalid input and an API call the service
+  refused, because ``ModalFormView.form_valid`` falls through to
+  ``form_invalid`` when ``form.handle`` raises.
+* **Queued messages.** Table actions redirect either way, so for those the
+  status code says nothing and Horizon's error messages are the only evidence.
+  Reading them is non-destructive — ``BaseStorage.update`` stores
+  ``_queued_messages`` without clearing it — so the operator still sees the
+  message regardless of where Astrolabe sits relative to Django's
+  ``MessageMiddleware``. That attribute is private, hence the guard and the
+  fallback to the status code alone.
+
+Rejected actions are still recorded, marked in the panel and commented in the
+downloaded script. Knowing what you tried is usually worth as much as knowing
+what worked.
+
+What is never read
+------------------
+
+Secret-looking field names are dropped before anything is read. ``password``,
+``secret``, ``token`` and ``credential`` match anywhere in the name (this is
+what catches Django's run-together ``csrfmiddlewaretoken``); ``pass``, ``key``
+and ``auth`` match only on word boundaries, so ``passthrough`` and
+``keystone_url`` survive. Names are split on camelCase first, so Nova's
 ``adminPass`` is caught too.
 
-Entries live in ``sessionStorage``, capped at 50, scoped to the browser tab and
-gone when it closes. Nothing is sent anywhere.
+Nothing is sent anywhere. Entries live in the operator's session, capped, and
+disappear at logout.
 
 A note on ``/api/*``
 --------------------
@@ -107,17 +136,17 @@ REST call as ``curl``.
 Endpoints and the token
 -----------------------
 
-The browser cannot know your service catalog, so commands are rendered against
-shell variables that you set once::
+Rendered commands carry no real endpoint and no real token — these panels get
+screenshotted into tickets. They reference shell variables you set once::
 
     export OS_TOKEN=$(openstack token issue -f value -c id)
     export OS_COMPUTE_API=https://your-cloud/compute/v2.1
     export OS_VOLUME_API=https://your-cloud/volume/v3/$OS_PROJECT_ID
     export OS_NETWORK_API=https://your-cloud:9696/v2.0
 
-**Your Keystone token is never written into a rendered command** — only the
-literal string ``$OS_TOKEN``. This is deliberate: these panels get screenshotted
-into tickets.
+The ``openstack`` commands themselves need none of these; they use your usual
+``clouds.yaml`` or ``OS_*`` credentials. The variables are only for the
+``curl`` equivalents.
 
 Installation
 ============
@@ -130,9 +159,9 @@ These steps assume a **source checkout of Horizon** (e.g. devstack) with the
     └── astrolabe/    # this repo
 
 A Horizon plugin is *not* copied into the ``horizon`` tree. ``pip install``
-puts the ``astrolabe`` package on Horizon's Python path; a single "enabled" file
-wires it in, and Horizon imports the rest from the installed package. The only
-file that lands in the ``horizon`` tree is that enabled file.
+puts the ``astrolabe`` package on Horizon's Python path; two small drop-in
+files wire it in, and Horizon imports the rest from the installed package.
+Nothing in the ``horizon`` tree gets edited.
 
 Every command must use **the Python environment that runs your Horizon**. If
 your checkout uses a virtualenv, activate it first; otherwise use whatever
@@ -156,8 +185,8 @@ Run these from the parent directory that holds both trees.
    (Use ``pip install -e .`` instead if you want edits in ``astrolabe`` to take
    effect on restart without reinstalling.)
 
-2. **Register the plugin** — copy the one enabled file into Horizon's local
-   enabled directory::
+2. **Register the panel** — copy the enabled file into Horizon's local enabled
+   directory::
 
      cp astrolabe/enabled/_9020_astrolabe.py \
         ../horizon/openstack_dashboard/local/enabled/
@@ -165,16 +194,23 @@ Run these from the parent directory that holds both trees.
    (The ``_9020_`` prefix controls load order; leave it unless it collides with
    an existing file.)
 
-3. **Collect the static asset.** Unlike a panel that can inline its assets,
-   Astrolabe's JavaScript has to reach *every* page, so it goes through
-   ``ADD_JS_FILES`` and Horizon's static pipeline::
+3. **Register the recorder.** Horizon's plugin loader has hooks for apps,
+   panels, JavaScript and header sections, but none for middleware, so this
+   takes a second drop-in file::
 
-     cd ../horizon
-     python manage.py collectstatic --noinput
-     python manage.py compress --force
+     cat > ../horizon/openstack_dashboard/local/local_settings.d/_9020_astrolabe.py <<'EOF'
+     MIDDLEWARE = list(MIDDLEWARE) + ['astrolabe.middleware.AstrolabeMiddleware']
+     EOF
 
-   The ``compress`` step is only needed when ``COMPRESS_OFFLINE`` is enabled
-   (typical for a production deployment); the dev server does not require it.
+   It has to be that directory rather than ``local_settings.py``. Snippets in
+   ``local_settings.d`` are ``exec``'d in the settings namespace, so
+   ``MIDDLEWARE`` is in scope to extend; ``local_settings.py`` is imported as
+   its own module, where the same line would raise ``NameError``.
+
+   Appending is correct. Astrolabe reads the response and Django runs the
+   response phase in reverse order, so the end of the list is where it belongs.
+
+   Without this step the panel installs and works, and stays permanently empty.
 
 4. **Restart Horizon.**
 
@@ -186,36 +222,61 @@ Run these from the parent directory that holds both trees.
        # or
        sudo systemctl restart apache2        # Ubuntu/Debian
 
-5. **Verify.** Log in as an admin-capable user. An **Astrolabe** item appears in
-   the top navigation bar. Go to *Admin > Compute > Flavors*, create a flavor,
-   then click **Astrolabe** — the drawer opens with the equivalent
-   ``openstack flavor create`` command and ``curl`` request.
+   No ``collectstatic`` or ``compress`` step: Astrolabe ships no static assets.
 
-   If the item does not appear, check that your user actually holds an admin
-   role in the current scope, and that step 3 ran against the same checkout.
+5. **Verify.** Log in as an admin-capable user. An **Astrolabe** dashboard
+   appears in the sidebar. Go to *Admin > Compute > Flavors*, create a flavor,
+   then open *Astrolabe > Commands* — the equivalent ``openstack flavor create``
+   command and ``curl`` request are waiting there.
+
+   If the dashboard does not appear, check that your user actually holds an
+   admin role in the current scope. If it appears but stays empty, step 3 did
+   not take: ``python manage.py diffsettings | grep -i middleware`` should
+   mention ``astrolabe``.
+
+Settings
+--------
+
+Both are optional, and go in ``local_settings.py`` like any other Horizon
+setting.
+
+``ASTROLABE_ENABLED``
+    Default ``True``. Set it to ``False`` to switch the recorder off without
+    uninstalling; the middleware then raises ``MiddlewareNotUsed`` at startup
+    and costs nothing per request. The panel stays visible and empty.
+
+``ASTROLABE_MAX_ENTRIES``
+    Default ``50``. Entries kept per session. Horizon's default session backend
+    is the cache, where 50 is nothing. Lower it if you have switched
+    ``SESSION_ENGINE`` to ``django.contrib.sessions.backends.signed_cookies``,
+    which puts the whole session in a ~4KB cookie.
 
 Uninstalling
 ============
 
-Remove the enabled file and reinstall the static assets::
+::
 
     rm ../horizon/openstack_dashboard/local/enabled/_9020_astrolabe.py
+    rm ../horizon/openstack_dashboard/local/local_settings.d/_9020_astrolabe.py
     pip uninstall astrolabe
 
-Then re-run step 3 and restart Horizon.
+Then restart Horizon.
 
 Extending the rule table
 ========================
 
 Adding a panel means adding one entry to ``FORMS`` in ``astrolabe/rules.py``.
-No JavaScript changes. A rule names the URL it matches, the command and
+Nothing else changes. A rule names the URL it matches, the command and
 endpoint it maps to, and the fields it carries. Four field kinds cover
 everything so far:
 
-``opt(field, flag, api, cast, omit_when)``
+``opt(field, flag, api, cast, omit_when, absent_when)``
     A value carried by a flag, ``--ram 2048``. ``omit_when`` drops the flag for
     a given value but keeps it in the REST body, which is how ``--swap 0``
     stays off the command line while ``swap: 0`` still reaches the API.
+    ``absent_when`` names a sentinel meaning "not supplied" and drops the field
+    from both — Horizon's flavor form uses ``auto`` that way, and novaclient
+    turns ``auto`` into an omitted id.
 
 ``boolean(field, api, on, off)``
     A checkbox. ``on`` is the flag emitted when ticked, ``off`` when not; either
@@ -239,8 +300,8 @@ the real form. You do not need to look the field names up by hand::
     {'network-create': ['with_subnet']}
 
 If the declarative vocabulary cannot express a new panel, extend both
-``rules.py`` and the interpreter's ``applyForm`` together, and add a case to
-``tests/test_interpreter.js``.
+``rules.py`` and ``translate.py``'s ``_apply_form`` together, and add a case to
+``tests/test_rules.py``.
 
 Keep new rules admin-scoped for now. Project-scoped panels bring policy and
 project-id questions that v1 deliberately avoids.
@@ -248,21 +309,21 @@ project-id questions that v1 deliberately avoids.
 Tests
 =====
 
-Dependency-free: no npm install, no jsdom, no pytest required::
+Dependency-free: no npm, no jsdom, no pytest required::
 
     python3 tests/test_rules.py
 
-Three layers, in increasing order of what has to be present:
+Four layers, in increasing order of what has to be present:
 
 1. The rules are well formed and internally consistent. Needs nothing.
-2. The JavaScript interpreter turns them into the expected commands. Needs
-   ``node``. The **real serialised rules** are handed to
-   ``tests/test_interpreter.js``, so the rule set has exactly one definition and
-   the tests cannot drift from it.
-3. The rules still match the Horizon forms they target. Needs a Horizon
+2. The interpreter turns them into the expected commands, and the session store
+   behaves. Needs nothing.
+3. The middleware records the right things, and only for the right people.
+   Needs Django, but not Horizon.
+4. The rules still match the Horizon forms they target. Needs a Horizon
    checkout, and is skipped with a note when one is not importable.
 
-To include layer 3, run it with the interpreter that has Horizon on its path::
+To include layer 4, run it with the interpreter that has Horizon on its path::
 
     cd ../horizon
     DJANGO_SETTINGS_MODULE=openstack_dashboard.test.settings PYTHONPATH=. \
@@ -276,12 +337,17 @@ Known limits
 
 * Only the four actions listed above are recognised. Everything else is
   silently ignored, by design.
-* Astrolabe records what was *submitted*, not what succeeded. A form the API
-  rejects still produces an entry.
+* There is no copy button, because there is no JavaScript. Select the text, or
+  use **Download as shell script** for the whole log at once.
+* The panel shows what you have already done; it does not appear beside the
+  form you are filling in. Do your work, then go and collect the commands.
 * Panels switched to their AngularJS variants via ``ANGULAR_FEATURES`` (flavors
-  has one) bypass the Django form path and are not recorded.
-* The rendered ``curl`` targets the real service APIs, not Horizon's proxy, so
-  it needs a token and endpoints from your own shell.
+  has one) POST JSON to Horizon's ``/api/*`` proxy instead of submitting a
+  Django form, and are not recorded.
+* Rendered commands reproduce what was submitted. They are a starting point for
+  a script, not a tested one — read them before you run them.
+* The ``curl`` equivalents target the real service APIs, not Horizon's proxy, so
+  they need a token and endpoints from your own shell.
 
 License
 =======

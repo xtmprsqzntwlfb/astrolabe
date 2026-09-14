@@ -13,15 +13,15 @@
 """What Astrolabe knows how to translate.
 
 This is the file you edit to teach Astrolabe a new panel. Each entry maps a
-Horizon form to the ``openstack`` command and REST call it corresponds to. The
-browser never contains any of this knowledge: the header view serialises these
-rules to JSON, the template embeds them, and a generic interpreter in
-``astrolabe.js`` applies them.
+Horizon form to the ``openstack`` command and REST call it corresponds to.
+This module is pure data plus its own self-check; :mod:`astrolabe.translate`
+holds the generic interpreter that applies these rules, and knows nothing
+about any particular panel.
 
-Keeping the rules here rather than in JavaScript buys one thing JavaScript
-cannot have — :func:`validate` imports the Horizon form each rule targets and
-checks the field names still exist, so a rename in a future Horizon release
-surfaces as a warning instead of a silently incomplete command.
+Because the rules live in Python, :func:`validate` can import the Horizon form
+each rule targets and check the field names still exist, so a rename in a
+future Horizon release surfaces as a warning instead of a silently incomplete
+command.
 
 Nothing at module level imports Django or Horizon, so this module stays
 importable (and testable) on its own.
@@ -29,8 +29,9 @@ importable (and testable) on its own.
 
 from importlib import import_module
 
-# Service endpoints are not knowable from the browser, so commands render
-# against these shell variables. The drawer footer documents them.
+# Rendered commands never carry a real endpoint or a real token: these panels
+# get screenshotted into tickets. Commands render against shell variables
+# instead, which the panel footer documents.
 COMPUTE = "$OS_COMPUTE_API"
 VOLUME = "$OS_VOLUME_API"
 NETWORK = "$OS_NETWORK_API"
@@ -42,16 +43,21 @@ NETWORK = "$OS_NETWORK_API"
 # reaches the command line, and how it reaches the REST body.
 
 
-def opt(field, flag, api=None, cast="str", omit_when=None):
+def opt(field, flag, api=None, cast="str", omit_when=None, absent_when=None):
     """A value carried by a flag: ``--ram 2048``.
 
     ``omit_when`` drops the flag for a given value but keeps it in the REST
     body, which is how ``--swap 0`` stays off the command line while ``swap:
     0`` remains meaningful to the API.
+
+    ``absent_when`` names a sentinel the operator can type that means "not
+    supplied", and drops the field from the command *and* the body. Horizon's
+    flavor form uses ``auto`` this way.
     """
     return {
         "kind": "value", "field": field, "flag": flag,
         "api": api or field, "cast": cast, "omitWhen": omit_when,
+        "absentWhen": absent_when,
     }
 
 
@@ -94,7 +100,9 @@ FORMS = [
         "envelope": "flavor",
         "command": ["openstack", "flavor", "create"],
         "fields": [
-            opt("flavor_id", "--id", api="id"),
+            # Horizon defaults this to "auto" and novaclient turns "auto"
+            # into an omitted id, so it must not reach the command or body.
+            opt("flavor_id", "--id", api="id", absent_when="auto"),
             opt("vcpus", "--vcpus", cast="int"),
             opt("memory_mb", "--ram", api="ram", cast="int"),
             opt("disk_gb", "--disk", api="disk", cast="int"),
@@ -160,11 +168,6 @@ TABLES = {
     "volume_types": {"noun": "volume type", "path": VOLUME + "/types"},
     "networks": {"noun": "network", "path": NETWORK + "/networks"},
 }
-
-
-def as_dict():
-    """The rule set, in the shape the JavaScript interpreter consumes."""
-    return {"forms": FORMS, "tables": TABLES}
 
 
 # ---------------------------------------------------------------- validation

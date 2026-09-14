@@ -1,4 +1,3 @@
 recursive-include astrolabe/templates *.html
-recursive-include astrolabe/static *.js
 recursive-include astrolabe/enabled *.py
 include README.rst LICENSE

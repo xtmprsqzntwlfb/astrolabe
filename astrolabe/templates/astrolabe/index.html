@@ -1,0 +1,97 @@
+{% extends 'base.html' %}
+{% load i18n %}
+
+{% comment %}
+No <script> tag anywhere in this plugin, by design. Selecting a command means
+selecting the text; taking the whole log means the download link, which is a
+plain GET returning a shell script.
+{% endcomment %}
+
+{% block title %}{% trans "Astrolabe" %}{% endblock %}
+
+{% block page_header %}
+  <hr class="header_rule">
+{% endblock %}
+
+{% block main %}
+<style>
+  .astrolabe-intro { color: #555; font-size: 13px; max-width: 60rem; }
+  .astrolabe-actions { margin: 12px 0; }
+  .astrolabe-actions form { display: inline; }
+  .astrolabe-entry { border-top: 1px solid #e3e3e3; padding: 14px 0; }
+  .astrolabe-entry h4 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .astrolabe-when { color: #888; font-weight: 400; font-size: 11px;
+                    margin-left: 8px; }
+  .astrolabe-rejected { color: #a94442; font-weight: 400; font-size: 11px;
+                        margin-left: 8px; }
+  .astrolabe-entry pre { margin: 4px 0; padding: 8px 10px; background: #f5f5f5;
+                         border: 1px solid #e3e3e3; border-radius: 3px;
+                         white-space: pre-wrap; word-break: break-all;
+                         font-size: 12px; }
+  .astrolabe-foot { margin-top: 18px; padding-top: 12px;
+                    border-top: 1px solid #e3e3e3; color: #666;
+                    font-size: 11px; line-height: 1.6; }
+  .astrolabe-foot code { font-size: 11px; }
+  .astrolabe-empty { color: #888; padding: 18px 0; }
+</style>
+
+<div class="astrolabe-intro">
+  {% blocktrans trimmed %}
+    The CLI and REST equivalents of the admin actions you have performed in
+    this session, newest first. Recorded server-side as you work; nothing is
+    sent anywhere, and the log disappears when you log out.
+  {% endblocktrans %}
+</div>
+
+<div class="astrolabe-actions">
+  <a class="btn btn-default btn-sm"
+     href="{% url 'horizon:astrolabe:commands:script' %}">
+    {% trans "Download as shell script" %}
+  </a>
+  {% if entries %}
+    <form method="post" action="{% url 'horizon:astrolabe:commands:clear' %}">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-default btn-sm">
+        {% trans "Clear" %}
+      </button>
+    </form>
+  {% endif %}
+</div>
+
+{% for entry in entries %}
+  <div class="astrolabe-entry">
+    <h4>
+      {{ entry.title }}
+      <span class="astrolabe-when">{{ entry.when|time:"H:i:s" }}</span>
+      {% if not entry.ok %}
+        <span class="astrolabe-rejected">
+          {% trans "rejected by the dashboard" %}
+        </span>
+      {% endif %}
+    </h4>
+    <pre aria-label="{% trans "CLI" %}">{{ entry.cli }}</pre>
+    {% for curl in entry.curls %}
+      <pre aria-label="{% trans "REST" %}">{{ curl }}</pre>
+    {% endfor %}
+  </div>
+{% empty %}
+  <div class="astrolabe-empty">
+    {% blocktrans trimmed %}
+      Nothing recorded yet. Create or delete a flavor, volume type or network
+      and it will show up here.
+    {% endblocktrans %}
+  </div>
+{% endfor %}
+
+<div class="astrolabe-foot">
+  {% blocktrans trimmed with limit=limit %}
+    The most recent {{ limit }} actions are kept. Your Keystone token is never
+    written into a rendered command — set these in the shell you run them from:
+  {% endblocktrans %}
+  <ul>
+    {% for name, example in environment %}
+      <li><code>{{ name }}</code> &mdash; {{ example }}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endblock %}

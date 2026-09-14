@@ -10,52 +10,74 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""The plugin's only view: an extensible-header section.
+"""The panel: read what the middleware recorded, render it, hand it back.
 
-Horizon renders every registered ``ADD_HEADER_SECTIONS`` view into the top
-navigation bar (see ``openstack_dashboard.views.ExtensibleHeaderView``). This
-one emits two things, both only when the logged-in user holds an admin role: a
-marker element that activates the bundled JavaScript, and the rule set from
-:mod:`astrolabe.rules` as embedded JSON.
-
-It makes no API calls, touches no database, and registers no URLs.
+These views make no API calls and reach nothing but the operator's own
+session. Access is already gated twice over — the dashboard carries the admin
+permissions, and the middleware only ever writes to an admin's session — so
+there is nothing here for a non-admin to read even if they reached it.
 """
 
-import logging
+import datetime
 
-from django.views import generic
+from django.http import HttpResponse
+from django.shortcuts import redirect
+from django.urls import reverse
+from django.utils.translation import gettext_lazy as _
+from django.views.decorators.http import require_POST
 
-from astrolabe import rules
+from horizon import views
 
-LOG = logging.getLogger(__name__)
+from astrolabe import store
+from astrolabe import translate
 
-_validated = False
+#: Shown in the panel footer and in the downloaded script's preamble.
+ENVIRONMENT = (
+    ("$OS_TOKEN", "openstack token issue -f value -c id"),
+    ("$OS_COMPUTE_API", "https://your-cloud/compute/v2.1"),
+    ("$OS_VOLUME_API", "https://your-cloud/volume/v3/$OS_PROJECT_ID"),
+    ("$OS_NETWORK_API", "https://your-cloud:9696/v2.0"),
+)
 
 
-def _validate_once():
-    """Warn if a Horizon upgrade has moved a field out from under a rule.
+def _decorate(entry):
+    """Add the display-only fields the template wants.
 
-    Deferred to first render rather than import time: the Horizon dashboard
-    modules a rule targets are not reliably importable while Django is still
-    assembling the app registry. Failures here are logged, never raised — a
-    header section that blows up costs the operator their navigation bar.
+    The session holds structured REST calls rather than rendered ``curl``
+    text, so the rendering happens here, once per view.
     """
-    global _validated
-    if _validated:
-        return
-    _validated = True
-    try:
-        for problem in rules.validate():
-            LOG.warning("astrolabe: %s", problem)
-    except Exception as exc:  # noqa: BLE001 - diagnostics must not break UI
-        LOG.warning("astrolabe: could not validate rules (%s)", exc)
+    shown = dict(entry)
+    shown["when"] = datetime.datetime.fromtimestamp(entry.get("at") or 0)
+    shown["curls"] = [translate.curl_for(call)
+                      for call in entry.get("calls") or []]
+    return shown
 
 
-class AstrolabeHeader(generic.TemplateView):
-    template_name = 'astrolabe/_header.html'
+class IndexView(views.HorizonTemplateView):
+    template_name = "astrolabe/index.html"
+    page_title = _("Commands")
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        _validate_once()
-        context['rules'] = rules.as_dict()
+        entries = store.load(self.request.session)
+        context["entries"] = [_decorate(entry) for entry in entries]
+        context["environment"] = ENVIRONMENT
+        context["limit"] = store.max_entries()
         return context
+
+
+def script(request):
+    """The whole log as a downloadable shell script."""
+    entries = store.load(request.session)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    response = HttpResponse(translate.script_for(entries),
+                            content_type="text/x-shellscript; charset=utf-8")
+    response["Content-Disposition"] = (
+        'attachment; filename="astrolabe-%s.sh"' % stamp)
+    return response
+
+
+@require_POST
+def clear(request):
+    store.clear(request.session)
+    return redirect(reverse("horizon:astrolabe:commands:index"))

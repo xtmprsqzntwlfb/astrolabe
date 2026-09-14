@@ -10,25 +10,30 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Horizon plugin registration for Astrolabe.
+"""Horizon plugin registration for the Astrolabe dashboard.
 
 Copy (or symlink) this file into your Horizon deployment's
-``openstack_dashboard/local/enabled/`` directory, and ensure ``astrolabe`` is
-importable (pip install the package).
+``openstack_dashboard/local/enabled/`` directory, and make sure ``astrolabe``
+is importable (pip install the package). Horizon auto-discovers ``dashboard.py``
+and ``panel.py`` in the added app.
 
-Astrolabe adds no dashboard and no panel. It contributes exactly two things to
-Horizon: one JavaScript file appended to the global bundle, and one template
-rendered into the extensible header.
+This file registers the *panel*. The recorder that fills it is a middleware,
+and Horizon's plugin loader has no hook for adding middleware, so that takes a
+second drop-in file, ``local/local_settings.d/_9020_astrolabe.py``::
+
+    MIDDLEWARE = list(MIDDLEWARE) + ['astrolabe.middleware.AstrolabeMiddleware']
+
+It has to be that directory rather than ``local_settings.py``: snippets there
+are exec'd in the settings namespace, so ``MIDDLEWARE`` is in scope to extend,
+whereas ``local_settings.py`` is imported as its own module and would raise
+NameError. See the README for the full sequence.
 """
 
-# Add our app so Django can find its templates and static files.
+# The slug of the dashboard this file configures.
+DASHBOARD = "astrolabe"
+
+# Not the default landing dashboard.
+DEFAULT = False
+
+# Add our app so Horizon imports its dashboard.py / panel.py.
 ADD_INSTALLED_APPS = ["astrolabe"]
-
-# The recorder itself. Horizon appends this to the JS bundle served on every
-# page, but it does nothing until the admin-only header marker shows up.
-ADD_JS_FILES = ["astrolabe/js/astrolabe.js"]
-
-# Renders the marker (and the toggle) into the top navigation bar. The template
-# gates on ``request.user.is_superuser``, which openstack_auth derives from the
-# user's roles in the current scope.
-ADD_HEADER_SECTIONS = ["astrolabe.views.AstrolabeHeader"]
