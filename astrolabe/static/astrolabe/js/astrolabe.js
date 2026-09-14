@@ -21,12 +21,14 @@
  * `submit` listener therefore sees every create and delete the operator
  * performs, along with the exact field values they entered.
  *
- * Each submission is matched against the rule table below. A submission that
- * matches no rule is ignored and never stored - Astrolabe only ever retains
- * fields for forms it explicitly understands.
+ * This file contains no knowledge of any particular Horizon panel. What to
+ * translate, and how, comes from astrolabe/rules.py, which the header template
+ * embeds as JSON. Everything below is the generic interpreter for those rules
+ * plus the drawer that displays the results.
  *
- * Nothing here calls OpenStack. The recorder reads what the operator already
- * submitted and renders the equivalent `openstack` command and REST request.
+ * A submission matching no rule is ignored and never stored. Nothing here
+ * calls OpenStack: the recorder reads what the operator already submitted and
+ * renders equivalent text.
  */
 
 (function () {
@@ -51,12 +53,6 @@
     return SECRET_ANYWHERE.test(normalized) || SECRET_WORD.test(normalized);
   }
 
-  // Service endpoints are not knowable from the browser, so commands are
-  // rendered against these shell variables. Documented in the drawer footer.
-  var COMPUTE = '$OS_COMPUTE_API';
-  var VOLUME = '$OS_VOLUME_API';
-  var NETWORK = '$OS_NETWORK_API';
-
   // ---------------------------------------------------------------- helpers
 
   /** Quote a value for a POSIX shell, leaving safe words bare. */
@@ -68,12 +64,8 @@
     return "'" + s.replace(/'/g, "'\\''") + "'";
   }
 
-  function num(value) {
-    if (value === null || value === undefined || value === '') {
-      return null;
-    }
-    var n = Number(value);
-    return isNaN(n) ? null : n;
+  function blank(value) {
+    return value === null || value === undefined || value === '';
   }
 
   /** Django renders unchecked booleans by omitting them entirely. */
@@ -81,200 +73,148 @@
     return value === 'on' || value === 'true' || value === 'True';
   }
 
-  /** Append `--flag value`, skipping empties and an optional default. */
-  function flag(parts, name, value, skipWhen) {
-    if (value === null || value === undefined || value === '') {
-      return;
+  function cast(value, how) {
+    if (how !== 'int') {
+      return String(value);
     }
-    if (skipWhen !== undefined && String(value) === String(skipWhen)) {
-      return;
-    }
-    parts.push(name, shq(value));
-  }
-
-  /** Drop null/undefined/'' so the rendered JSON body stays readable. */
-  function prune(obj) {
-    Object.keys(obj).forEach(function (k) {
-      var v = obj[k];
-      if (v === null || v === undefined || v === '') {
-        delete obj[k];
-      }
-    });
-    return obj;
+    var n = Number(value);
+    return isNaN(n) ? null : n;
   }
 
   function asList(value) {
-    if (value === null || value === undefined || value === '') {
+    if (blank(value)) {
       return [];
     }
     return Array.isArray(value) ? value : [value];
   }
 
-  // ------------------------------------------------------------ rule table
-  //
-  // Each rule: match(url, fields) -> bool, build(fields, url) -> record|null.
-  // A record is { title, cli, calls: [{ method, url, body }] }.
+  // ------------------------------------------------------------ interpreter
 
-  // Table actions encode themselves as "<table>__<action>[__<id>]" in a field
-  // named "action". Only tables listed here are recognised.
-  var TABLES = {
-    flavors: { noun: 'flavor', path: COMPUTE + '/flavors' },
-    volume_types: { noun: 'volume type', path: VOLUME + '/types' },
-    networks: { noun: 'network', path: NETWORK + '/networks' }
-  };
+  /**
+   * Apply one form rule to a submission.
+   *
+   * Positionals are collected and appended last regardless of where they
+   * appear in the rule, because that is where the openstack CLI wants them.
+   */
+  function applyForm(spec, fields) {
+    var parts = spec.command.slice();
+    var trailing = [];
+    var body = {};
+    var subject = '';
 
-  var RULES = [
-    {
-      // Admin > Compute > Flavors > Create Flavor
-      match: function (url) {
-        return /\/admin\/flavors\/create\/?$/.test(url);
-      },
-      build: function (f) {
-        var parts = ['openstack', 'flavor', 'create'];
-        flag(parts, '--id', f.flavor_id);
-        flag(parts, '--vcpus', f.vcpus);
-        flag(parts, '--ram', f.memory_mb);
-        flag(parts, '--disk', f.disk_gb);
-        flag(parts, '--ephemeral', f.eph_gb, '0');
-        flag(parts, '--swap', f.swap_mb, '0');
-        parts.push(shq(f.name));
-        return {
-          title: 'Create flavor ' + (f.name || ''),
-          cli: parts.join(' '),
-          calls: [{
-            method: 'POST',
-            url: COMPUTE + '/flavors',
-            body: {
-              flavor: prune({
-                name: f.name,
-                id: f.flavor_id,
-                vcpus: num(f.vcpus),
-                ram: num(f.memory_mb),
-                disk: num(f.disk_gb),
-                'OS-FLV-EXT-DATA:ephemeral': num(f.eph_gb),
-                swap: num(f.swap_mb)
-              })
-            }
-          }]
-        };
+    spec.fields.forEach(function (field) {
+      var raw = fields[field.field];
+
+      if (field.kind === 'value') {
+        if (blank(raw)) {
+          return;
+        }
+        if (field.omitWhen === null || String(raw) !== String(field.omitWhen)) {
+          parts.push(field.flag, shq(raw));
+        }
+        var value = cast(raw, field.cast);
+        if (value !== null) {
+          body[field.api] = value;
+        }
+        return;
       }
-    },
-    {
-      // Admin > Volume > Volume Types > Create Volume Type
-      match: function (url) {
-        return /\/admin\/volume_types\/create_type\/?$/.test(url);
-      },
-      build: function (f) {
-        var parts = ['openstack', 'volume', 'type', 'create'];
-        flag(parts, '--description', f.vol_type_description);
-        // The form ships is_public checked by default; only the private case
-        // needs a flag.
-        if (!checked(f.is_public)) {
-          parts.push('--private');
+
+      if (field.kind === 'flag') {
+        var on = checked(raw);
+        if (on && field.on) {
+          parts.push(field.on);
+        } else if (!on && field.off) {
+          parts.push(field.off);
         }
-        parts.push(shq(f.name));
-        return {
-          title: 'Create volume type ' + (f.name || ''),
-          cli: parts.join(' '),
-          calls: [{
-            method: 'POST',
-            url: VOLUME + '/types',
-            body: {
-              volume_type: prune({
-                name: f.name,
-                description: f.vol_type_description,
-                'os-volume-type-access:is_public': checked(f.is_public)
-              })
-            }
-          }]
-        };
+        body[field.api] = on;
+        return;
       }
-    },
-    {
-      // Admin > Network > Networks > Create Network
-      match: function (url) {
-        return /\/admin\/networks\/create\/?$/.test(url);
-      },
-      build: function (f) {
-        var parts = ['openstack', 'network', 'create'];
-        flag(parts, '--project', f.tenant_id);
-        flag(parts, '--provider-network-type', f.network_type);
-        flag(parts, '--provider-physical-network', f.physical_network);
-        flag(parts, '--provider-segment', f.segmentation_id);
-        flag(parts, '--mtu', f.mtu);
-        if (checked(f.shared)) {
-          parts.push('--share');
-        }
-        if (checked(f.external)) {
-          parts.push('--external');
-        }
-        // admin_state is a checkbox that defaults to up; absent means down.
-        if (!checked(f.admin_state)) {
-          parts.push('--disable');
-        }
-        asList(f.az_hints).forEach(function (az) {
-          flag(parts, '--availability-zone-hint', az);
+
+      if (field.kind === 'multi') {
+        var values = asList(raw);
+        values.forEach(function (one) {
+          parts.push(field.flag, shq(one));
         });
-        parts.push(shq(f.name));
-        return {
-          title: 'Create network ' + (f.name || ''),
-          cli: parts.join(' '),
-          calls: [{
-            method: 'POST',
-            url: NETWORK + '/networks',
-            body: {
-              network: prune({
-                name: f.name,
-                tenant_id: f.tenant_id,
-                'provider:network_type': f.network_type,
-                'provider:physical_network': f.physical_network,
-                'provider:segmentation_id': num(f.segmentation_id),
-                mtu: num(f.mtu),
-                shared: checked(f.shared),
-                'router:external': checked(f.external),
-                admin_state_up: checked(f.admin_state),
-                availability_zone_hints: asList(f.az_hints)
-              })
-            }
-          }]
-        };
+        if (values.length) {
+          body[field.api] = values;
+        }
+        return;
       }
-    },
-    {
-      // Table row and batch deletes, for any table named in TABLES.
-      match: function (url, f) {
-        return typeof f.action === 'string' &&
-          /^[a-z0-9_]+__delete(__|$)/.test(f.action);
-      },
-      build: function (f) {
-        var bits = f.action.split('__');
-        var table = TABLES[bits[0]];
-        if (!table) {
-          return null;
+
+      if (field.kind === 'positional') {
+        if (blank(raw)) {
+          return;
         }
-        // Row action carries the id in the third segment; batch action puts
-        // the selected ids in repeated object_ids fields.
-        var ids = bits.length > 2 ? [bits.slice(2).join('__')]
-          : asList(f.object_ids);
-        if (!ids.length) {
-          return null;
-        }
-        return {
-          title: 'Delete ' + table.noun + (ids.length > 1 ? 's' : '') +
-            ' (' + ids.length + ')',
-          cli: 'openstack ' + table.noun + ' delete ' +
-            ids.map(shq).join(' '),
-          calls: ids.map(function (id) {
-            return {
-              method: 'DELETE',
-              url: table.path + '/' + id,
-              body: null
-            };
-          })
-        };
+        trailing.push(shq(raw));
+        body[field.api] = String(raw);
+        subject = String(raw);
+      }
+    });
+
+    var wrapped = {};
+    wrapped[spec.envelope] = body;
+
+    return {
+      title: subject ? spec.title + ' ' + subject : spec.title,
+      cli: parts.concat(trailing).join(' '),
+      calls: [{
+        method: spec.method,
+        url: spec.endpoint,
+        body: wrapped
+      }]
+    };
+  }
+
+  /** Apply the generic table-delete rule, if the action names a known table. */
+  function applyDelete(tables, fields) {
+    var bits = String(fields.action).split('__');
+    var table = tables[bits[0]];
+    if (!table) {
+      return null;
+    }
+    // A row action carries the id in the third segment; a batch action puts
+    // the selected ids in repeated object_ids fields.
+    var ids = bits.length > 2 ? [bits.slice(2).join('__')]
+      : asList(fields.object_ids);
+    if (!ids.length) {
+      return null;
+    }
+    return {
+      title: 'Delete ' + table.noun + (ids.length > 1 ? 's' : '') +
+        ' (' + ids.length + ')',
+      cli: 'openstack ' + table.noun + ' delete ' + ids.map(shq).join(' '),
+      calls: ids.map(function (id) {
+        return { method: 'DELETE', url: table.path + '/' + id, body: null };
+      })
+    };
+  }
+
+  /** Translate a submission, or return null if no rule claims it. */
+  function translate(spec, url, fields) {
+    for (var i = 0; i < spec.forms.length; i++) {
+      if (spec.forms[i].pattern.test(url)) {
+        return applyForm(spec.forms[i], fields);
       }
     }
-  ];
+    if (typeof fields.action === 'string' &&
+        /^[a-z0-9_]+__delete(__|$)/.test(fields.action)) {
+      return applyDelete(spec.tables, fields);
+    }
+    return null;
+  }
+
+  /** Read the embedded rule set, compiling each url pattern once. */
+  function loadSpec() {
+    var node = document.getElementById('astrolabe-rules');
+    if (!node) {
+      return null;
+    }
+    var spec = JSON.parse(node.textContent);
+    spec.forms.forEach(function (form) {
+      form.pattern = new RegExp(form.url);
+    });
+    return spec;
+  }
 
   // ------------------------------------------------------------- rendering
 
@@ -343,27 +283,21 @@
     return fields;
   }
 
-  function record(form, submitter) {
+  function record(spec, form, submitter) {
     var fields = readFields(form, submitter);
     var url = form.getAttribute('action') || window.location.pathname;
-    for (var i = 0; i < RULES.length; i++) {
-      if (!RULES[i].match(url, fields)) {
-        continue;
-      }
-      var built = RULES[i].build(fields, url);
-      if (!built) {
-        return;
-      }
-      var entries = load();
-      entries.unshift({
-        at: Date.now(),
-        title: built.title,
-        cli: built.cli,
-        calls: built.calls || []
-      });
-      save(entries);
+    var built = translate(spec, url, fields);
+    if (!built) {
       return;
     }
+    var entries = load();
+    entries.unshift({
+      at: Date.now(),
+      title: built.title,
+      cli: built.cli,
+      calls: built.calls || []
+    });
+    save(entries);
   }
 
   // ------------------------------------------------------------------- UI
@@ -436,7 +370,7 @@
     return wrap;
   }
 
-  function build(toggle) {
+  function build(toggle, spec) {
     var style = el('style');
     style.textContent = STYLE;
     document.head.appendChild(style);
@@ -459,9 +393,9 @@
 
     var foot = el('div', 'astrolabe-foot', null);
     foot.appendChild(document.createTextNode(
-      'Commands are rendered against $OS_TOKEN, ' + COMPUTE + ' (e.g. ' +
-      'https://host/compute/v2.1), ' + VOLUME + ' (e.g. ' +
-      'https://host/volume/v3/$OS_PROJECT_ID) and ' + NETWORK + ' (e.g. ' +
+      'Commands are rendered against $OS_TOKEN, $OS_COMPUTE_API (e.g. ' +
+      'https://host/compute/v2.1), $OS_VOLUME_API (e.g. ' +
+      'https://host/volume/v3/$OS_PROJECT_ID) and $OS_NETWORK_API (e.g. ' +
       'https://host:9696/v2.0). Your token is never written into a command. ' +
       'Recorded in this browser tab only.'));
 
@@ -472,13 +406,16 @@
 
     var count = document.getElementById('astrolabe-count');
 
+    function badge(n) {
+      if (count) {
+        count.textContent = String(n);
+        count.hidden = n === 0;
+      }
+    }
+
     function render() {
       var entries = load();
-
-      if (count) {
-        count.textContent = String(entries.length);
-        count.hidden = entries.length === 0;
-      }
+      badge(entries.length);
 
       body.textContent = '';
       if (!entries.length) {
@@ -502,17 +439,17 @@
       });
     }
 
-    function open() {
-      render();
-      drawer.hidden = false;
-    }
-
     toggle.addEventListener('click', function (evt) {
       evt.preventDefault();
       // Horizon binds its own click handler to header sections to reorder
       // them; don't let a toggle click trigger that.
       evt.stopPropagation();
-      if (drawer.hidden) { open(); } else { drawer.hidden = true; }
+      if (drawer.hidden) {
+        render();
+        drawer.hidden = false;
+      } else {
+        drawer.hidden = true;
+      }
     });
     toggle.addEventListener('keydown', function (evt) {
       if (evt.key === 'Enter' || evt.key === ' ') {
@@ -537,13 +474,11 @@
         return;
       }
       try {
-        record(form, evt.submitter);
-        if (!drawer.hidden) {
+        record(spec, form, evt.submitter);
+        if (drawer.hidden) {
+          badge(load().length);
+        } else {
           render();
-        } else if (count) {
-          var n = load().length;
-          count.textContent = String(n);
-          count.hidden = n === 0;
         }
       } catch (e) {
         // Never let a recording bug block the operator's action.
@@ -560,14 +495,15 @@
   // inspect what Astrolabe parsed from the browser console. Not an interface
   // anything else should depend on.
   window.astrolabe = {
-    rules: RULES,
+    loadSpec: loadSpec,
+    translate: translate,
     curlFor: curlFor,
     readFields: readFields
   };
 
   // The header section arrives by AJAX after page load (see
   // horizon.extensible_header.js), and only for admins. Wait for it: no
-  // marker means no drawer and no recording.
+  // marker means no drawer, no rules and no recording.
   function whenReady(callback) {
     var found = document.getElementById('astrolabe-toggle');
     if (found) {
@@ -592,6 +528,10 @@
       return;
     }
     started = true;
-    build(toggle);
+    var spec = loadSpec();
+    if (!spec) {
+      return;
+    }
+    build(toggle, spec);
   });
 }());

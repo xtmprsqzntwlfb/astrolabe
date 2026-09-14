@@ -11,13 +11,18 @@
  * License for the specific language governing permissions and limitations
  * under the License.
  *
- * Tests for Astrolabe's translation layer: form fields in, CLI and REST out.
+ * Tests for the JavaScript interpreter: rules plus form fields in, CLI and
+ * REST out.
  *
- * Dependency-free on purpose — a Horizon plugin gets installed into whatever
- * environment the deployment already has. Run with:  node tests/test_rules.js
+ * The rules are not duplicated here. They are passed in as JSON produced by
+ * astrolabe/rules.py, so these assertions run against the real rule set:
  *
- * The DOM is stubbed only far enough for the source file to evaluate; the
- * rules themselves are pure and are exercised directly.
+ *     python3 tests/test_rules.py        # writes the JSON, then runs this
+ *     node tests/test_interpreter.js <rules.json>
+ *
+ * Dependency-free on purpose - a Horizon plugin gets installed into whatever
+ * environment the deployment already has. The DOM is stubbed only far enough
+ * for the source file to evaluate.
  */
 
 'use strict';
@@ -26,6 +31,14 @@ var assert = require('assert');
 var fs = require('fs');
 var path = require('path');
 var vm = require('vm');
+
+var rulesPath = process.argv[2];
+if (!rulesPath) {
+  console.error('usage: node tests/test_interpreter.js <rules.json>');
+  console.error('(or just run: python3 tests/test_rules.py)');
+  process.exit(2);
+}
+var rulesJson = fs.readFileSync(rulesPath, 'utf8');
 
 // ---------------------------------------------------------------- stub DOM
 
@@ -43,17 +56,6 @@ FakeFormData.prototype.forEach = function (fn) {
   this._pairs.forEach(function (pair) { fn(pair[1], pair[0]); });
 };
 
-/**
- * Objects built inside the vm have a different Object.prototype, so
- * deepStrictEqual would reject them on realm alone. Compare values instead.
- */
-function sameValue(actual, expected, message) {
-  assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(actual)),
-    JSON.parse(JSON.stringify(expected)), message);
-}
-
-var listeners = {};
 var sandbox = {
   console: console,
   setTimeout: setTimeout,
@@ -62,11 +64,15 @@ var sandbox = {
   Array: Array,
   Object: Object,
   Number: Number,
+  RegExp: RegExp,
   isNaN: isNaN,
   document: {
-    // No #astrolabe-toggle ever appears, so the UI never builds. That is the
-    // non-admin path, and it keeps this harness to the pure logic.
-    getElementById: function () { return null; },
+    getElementById: function (id) {
+      // The rule set is present, but the admin marker never is, so the UI
+      // never builds. That is the non-admin path, and it keeps this harness
+      // to the pure logic.
+      return id === 'astrolabe-rules' ? { textContent: rulesJson } : null;
+    },
     documentElement: {},
     createElement: function () {
       return {
@@ -74,7 +80,7 @@ var sandbox = {
         addEventListener: function () {}
       };
     },
-    addEventListener: function (name, fn) { listeners[name] = fn; },
+    addEventListener: function () {},
     head: { appendChild: function () {} },
     body: { appendChild: function () {}, removeChild: function () {} }
   },
@@ -104,16 +110,23 @@ vm.runInContext(
   sandbox);
 
 var astrolabe = sandbox.window.astrolabe;
-assert.ok(astrolabe && astrolabe.rules.length, 'source did not evaluate');
+assert.ok(astrolabe, 'source did not evaluate');
 
-/** Run the first matching rule, as record() would. */
+var spec = astrolabe.loadSpec();
+assert.ok(spec && spec.forms.length, 'rule set did not load');
+
 function translate(url, fields) {
-  for (var i = 0; i < astrolabe.rules.length; i++) {
-    if (astrolabe.rules[i].match(url, fields)) {
-      return astrolabe.rules[i].build(fields, url);
-    }
-  }
-  return null;
+  return astrolabe.translate(spec, url, fields);
+}
+
+/**
+ * Objects built inside the vm have a different Object.prototype, so
+ * deepStrictEqual would reject them on realm alone. Compare values instead.
+ */
+function sameValue(actual, expected, message) {
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(actual)),
+    JSON.parse(JSON.stringify(expected)), message);
 }
 
 // ------------------------------------------------------------------- tests
@@ -129,10 +142,11 @@ tests['flavor create renders every flag'] = function () {
     'openstack flavor create --id auto --vcpus 1 --ram 2048 --disk 20 ' +
     '--ephemeral 5 --swap 512 m1.small');
   sameValue(out.calls[0].body.flavor, {
-    name: 'm1.small', id: 'auto', vcpus: 1, ram: 2048, disk: 20,
-    'OS-FLV-EXT-DATA:ephemeral': 5, swap: 512
+    id: 'auto', vcpus: 1, ram: 2048, disk: 20,
+    'OS-FLV-EXT-DATA:ephemeral': 5, swap: 512, name: 'm1.small'
   });
   assert.strictEqual(out.calls[0].method, 'POST');
+  assert.strictEqual(out.title, 'Create flavor m1.small');
 };
 
 tests['flavor create omits zero ephemeral and swap'] = function () {
@@ -144,6 +158,7 @@ tests['flavor create omits zero ephemeral and swap'] = function () {
   assert.ok(!/--swap/.test(out.cli), 'swap 0 should be omitted');
   // Zero is still meaningful in the API body, unlike on the command line.
   assert.strictEqual(out.calls[0].body.flavor['OS-FLV-EXT-DATA:ephemeral'], 0);
+  assert.strictEqual(out.calls[0].body.flavor.swap, 0);
 };
 
 tests['names needing quotes are shell-escaped'] = function () {
@@ -153,6 +168,7 @@ tests['names needing quotes are shell-escaped'] = function () {
   });
   assert.ok(out.cli.endsWith("'it'\\''s big'"), 'got: ' + out.cli);
   assert.ok(!/--id/.test(out.cli), 'blank id should be omitted');
+  assert.ok(!('id' in out.calls[0].body.flavor), 'blank id should not be sent');
 };
 
 tests['volume type defaults to public'] = function () {
@@ -168,6 +184,8 @@ tests['volume type defaults to public'] = function () {
 tests['volume type without the checkbox is private'] = function () {
   var out = translate('/admin/volume_types/create_type', { name: 'ssd' });
   assert.strictEqual(out.cli, 'openstack volume type create --private ssd');
+  assert.strictEqual(
+    out.calls[0].body.volume_type['os-volume-type-access:is_public'], false);
 };
 
 tests['network create maps provider attributes'] = function () {
@@ -194,6 +212,9 @@ tests['unchecked admin_state becomes --disable'] = function () {
   });
   assert.ok(/--disable/.test(out.cli), 'got: ' + out.cli);
   assert.ok(!/--share|--external/.test(out.cli));
+  assert.strictEqual(out.calls[0].body.network.admin_state_up, false);
+  assert.ok(!('availability_zone_hints' in out.calls[0].body.network),
+    'an empty multi-select should not be sent');
 };
 
 tests['row delete uses the id in the action field'] = function () {
@@ -234,8 +255,7 @@ tests['secret-looking fields are never read'] = function () {
       ['api_token', 'nope'],
       ['adminPass', 'nope'],
       ['name', 'keep-me']
-    ],
-    getAttribute: function () { return '/x/'; }
+    ]
   });
   sameValue(Object.keys(fields), ['name']);
 };
@@ -289,5 +309,5 @@ Object.keys(tests).forEach(function (name) {
 });
 
 console.log('\n' + (Object.keys(tests).length - failed) + '/' +
-  Object.keys(tests).length + ' passed');
+  Object.keys(tests).length + ' interpreter tests passed');
 process.exit(failed ? 1 : 0);

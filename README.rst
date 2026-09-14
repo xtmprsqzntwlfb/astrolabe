@@ -14,11 +14,14 @@ Design goals
 ============
 
 * **No backend.** No models, no migrations, no API endpoints, no daemons, no
-  extra runtime dependencies. The Python side is one
-  ``TemplateView`` subclass whose entire body is a template name.
+  extra runtime dependencies. The Python side is a rule table and one
+  ``TemplateView`` subclass.
 * **Django only.** No AngularJS. Horizon is moving toward removing Angular
   altogether, so Astrolabe hooks the Django form path exclusively and will
   outlive that removal.
+* **Logic in Python.** What to translate, and how, lives in
+  ``astrolabe/rules.py``. The JavaScript is a generic interpreter with no
+  knowledge of any particular panel.
 * **Encapsulated.** It adds no dashboard and no panel, and patches nothing in
   Horizon. It contributes one JavaScript file and one header template.
 * **Admin only.** The header template gates on ``request.user.is_superuser``,
@@ -39,6 +42,24 @@ the operator performs, together with the exact values they entered.
 Each submission is matched against a rule table. **A submission that matches no
 rule is ignored and never stored** — Astrolabe only ever retains fields for the
 handful of forms it explicitly understands.
+
+The rules themselves live in Python, in ``astrolabe/rules.py``. The header view
+serialises them to JSON, the template embeds them with Django's ``json_script``
+filter, and the JavaScript reads them from the page. Nothing is fetched at
+action time, and no endpoint exists to fetch from::
+
+    rules.py  ──serialise──▶  header view  ──json_script──▶  <script> in page
+                                                                    │
+                                        astrolabe.js interpreter ◀──┘
+
+Keeping the rules in Python buys one thing JavaScript cannot have.
+``rules.validate()`` imports the Horizon form each rule targets and checks the
+field names still exist, so a rename in a future Horizon release surfaces as a
+logged warning on first render rather than a silently incomplete command. The
+check is deferred to first render (the dashboard modules are not reliably
+importable while Django is still assembling the app registry) and its failures
+are logged, never raised — a header section that throws costs the operator
+their navigation bar.
 
 On top of that, secret-looking field names are dropped before anything is read.
 ``password``, ``secret``, ``token`` and ``credential`` match anywhere in the
@@ -186,12 +207,40 @@ Then re-run step 3 and restart Horizon.
 Extending the rule table
 ========================
 
-Adding a panel means adding one entry to ``RULES`` in
-``astrolabe/static/astrolabe/js/astrolabe.js``. A rule is a ``match(url,
-fields)`` predicate and a ``build(fields, url)`` that returns a title, a CLI
-string and a list of REST calls. The field names come straight from the Django
-form class — read them out of the relevant
-``openstack_dashboard/dashboards/.../forms.py`` or ``workflows.py``.
+Adding a panel means adding one entry to ``FORMS`` in ``astrolabe/rules.py``.
+No JavaScript changes. A rule names the URL it matches, the command and
+endpoint it maps to, and the fields it carries. Four field kinds cover
+everything so far:
+
+``opt(field, flag, api, cast, omit_when)``
+    A value carried by a flag, ``--ram 2048``. ``omit_when`` drops the flag for
+    a given value but keeps it in the REST body, which is how ``--swap 0``
+    stays off the command line while ``swap: 0`` still reaches the API.
+
+``boolean(field, api, on, off)``
+    A checkbox. ``on`` is the flag emitted when ticked, ``off`` when not; either
+    may be omitted. That covers both ``--share`` (emitted when ticked) and
+    ``--disable`` (emitted when *not* ticked).
+
+``repeated(field, flag, api)``
+    A multi-select, emitted as the flag once per value.
+
+``arg(field, api)``
+    A positional argument. Always rendered last, as the CLI expects.
+
+Set ``form`` to the Horizon class the rule targets, as
+``"module:ClassName"``. That is what lets ``validate()`` check the rule against
+the real form. You do not need to look the field names up by hand::
+
+    >>> from astrolabe import rules
+    >>> rules.validate()     # [] when every field still exists
+    []
+    >>> rules.uncovered()    # form fields no rule mentions
+    {'network-create': ['with_subnet']}
+
+If the declarative vocabulary cannot express a new panel, extend both
+``rules.py`` and the interpreter's ``applyForm`` together, and add a case to
+``tests/test_interpreter.js``.
 
 Keep new rules admin-scoped for now. Project-scoped panels bring policy and
 project-id questions that v1 deliberately avoids.
@@ -199,13 +248,28 @@ project-id questions that v1 deliberately avoids.
 Tests
 =====
 
-The translation layer has a dependency-free test harness — no npm install, no
-jsdom, just Node::
+Dependency-free: no npm install, no jsdom, no pytest required::
 
-    node tests/test_rules.js
+    python3 tests/test_rules.py
 
-It stubs the DOM only far enough for the source to evaluate, then drives the
-rules directly with the field names taken from Horizon's own form classes.
+Three layers, in increasing order of what has to be present:
+
+1. The rules are well formed and internally consistent. Needs nothing.
+2. The JavaScript interpreter turns them into the expected commands. Needs
+   ``node``. The **real serialised rules** are handed to
+   ``tests/test_interpreter.js``, so the rule set has exactly one definition and
+   the tests cannot drift from it.
+3. The rules still match the Horizon forms they target. Needs a Horizon
+   checkout, and is skipped with a note when one is not importable.
+
+To include layer 3, run it with the interpreter that has Horizon on its path::
+
+    cd ../horizon
+    DJANGO_SETTINGS_MODULE=openstack_dashboard.test.settings PYTHONPATH=. \
+        ./.tox/runserver/bin/python ../astrolabe/tests/test_rules.py
+
+That layer includes a test that deliberately stages a renamed field and asserts
+``validate()`` reports it, so the safety net cannot pass vacuously.
 
 Known limits
 ============
