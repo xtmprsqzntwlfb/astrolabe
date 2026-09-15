@@ -251,6 +251,88 @@ setting.
     ``SESSION_ENGINE`` to ``django.contrib.sessions.backends.signed_cookies``,
     which puts the whole session in a ~4KB cookie.
 
+Local dev setup (tox runserver against a devstack VM)
+=====================================================
+
+A common dev layout: OpenStack runs on a **devstack VM**, and you run a **local
+Horizon checkout** on your workstation, pointed at the VM's Keystone via
+``OPENSTACK_HOST`` in ``local_settings.py``. Attaching Astrolabe this way
+touches only your local checkout — the VM is never modified. Astrolabe makes no
+API calls of its own at all, so it adds no traffic to the VM beyond the
+requests your own clicks already send.
+
+This checkout is launched with ``tox -e runserver``, so the Python environment
+Horizon actually uses is the tox venv at ``horizon/.tox/runserver`` — that is
+where Astrolabe must be installed (not your system or user ``pip``). Paths
+below assume ``horizon`` and ``astrolabe`` side by side.
+
+1. **Install into the runserver venv** (editable, so your edits apply on the
+   next restart). Use the **absolute path** to your ``astrolabe`` checkout so
+   the install doesn't depend on your current directory — an editable install
+   records the path you give it::
+
+     horizon/.tox/runserver/bin/pip install -e /full/path/to/astrolabe
+
+2. **Verify it imports with settings loaded**, and check the rule table against
+   the Horizon you are about to run it on. A bare ``python -c "import
+   astrolabe"`` proves very little — ``rules.validate()`` is the interesting
+   check, and it imports Horizon's form classes, which need Django settings. Go
+   through ``manage.py`` instead::
+
+     horizon/.tox/runserver/bin/python horizon/manage.py shell \
+       -c "from astrolabe import rules; print(rules.validate() or 'ok')"
+
+   ``ok`` means every rule still lines up with the forms in this checkout.
+   Anything else is a list of rules to fix before they silently stop matching.
+
+3. **Register the panel**::
+
+     cp astrolabe/astrolabe/enabled/_9020_astrolabe.py \
+        horizon/openstack_dashboard/local/enabled/
+
+4. **Register the recorder**::
+
+     cat > horizon/openstack_dashboard/local/local_settings.d/_9020_astrolabe.py <<'EOF'
+     MIDDLEWARE = list(MIDDLEWARE) + ['astrolabe.middleware.AstrolabeMiddleware']
+     EOF
+
+   Put ``ASTROLABE_ENABLED`` and ``ASTROLABE_MAX_ENTRIES``, if you want them, in
+   ``local_settings.py`` — **not** in shell environment variables. tox only
+   forwards allowlisted vars into the venv (``passenv``), so an exported
+   ``ASTROLABE_MAX_ENTRIES`` would not reach the running server anyway, and
+   Astrolabe reads settings, not the environment.
+
+5. **Run it** from the ``horizon`` dir::
+
+     tox -e runserver
+
+   No ``collectstatic`` or ``compress`` step at any point: Astrolabe ships no
+   static assets.
+
+Notes:
+
+* **Recreating the venv wipes the Astrolabe install.** ``tox -re runserver``
+  always rebuilds it, but a plain ``tox -e runserver`` will too whenever tox
+  decides the environment is stale. The symptom is
+  ``ModuleNotFoundError: No module named 'astrolabe'`` at startup; the fix is to
+  re-run step 1. To check::
+
+    horizon/.tox/runserver/bin/pip show astrolabe
+
+  Steps 3 and 4 survive this — those two files live in the ``horizon`` tree, not
+  in the venv. Only the ``pip install`` is lost.
+
+* **Restarting the dev server can empty the panel.** The log lives in your
+  Horizon session, so it lasts exactly as long as the session backend does. With
+  Horizon's default ``SESSION_ENGINE`` over a local-memory cache the session
+  dies with the process — every autoreload logs you out and clears the log.
+  Point ``CACHES`` at a running memcached if you want a log that survives your
+  own edits.
+
+* To see anything at all you need to be logged in with an **admin role in the
+  current scope** on the devstack VM, and to perform one of the actions in *What
+  v1 covers*. A demo-only login gets no Astrolabe dashboard, by design.
+
 Uninstalling
 ============
 
