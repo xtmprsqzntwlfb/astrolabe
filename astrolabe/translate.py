@@ -20,6 +20,7 @@ Nothing at module level imports Django or Horizon, so the whole translation
 path stays importable and testable on its own.
 """
 
+import functools
 import json
 import re
 
@@ -36,9 +37,6 @@ SECRET_WORD = re.compile(r"(^|_)(pass|key|auth)(_|$)", re.I)
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])")
 _SAFE_WORD = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
 _DELETE_ACTION = re.compile(r"^[a-z0-9_]+__delete(__|$)")
-
-# Compiled once; the rule table does not change at runtime.
-_patterns = {}
 
 
 def is_secret(name):
@@ -131,7 +129,7 @@ def _apply_form(spec, fields):
             raw = _scalar(raw)
             if _blank(raw):
                 continue
-            absent = field.get("absentWhen")
+            absent = field["absentWhen"]
             if absent is not None and str(raw) == str(absent):
                 continue
             omit = field["omitWhen"]
@@ -206,17 +204,16 @@ def _apply_delete(fields):
     }
 
 
-def _pattern(form):
-    compiled = _patterns.get(form["id"])
-    if compiled is None or compiled.pattern != form["url"]:
-        compiled = _patterns[form["id"]] = re.compile(form["url"])
-    return compiled
+@functools.lru_cache(maxsize=None)
+def _pattern(expression):
+    """Compile a rule's URL pattern, once per distinct expression."""
+    return re.compile(expression)
 
 
 def translate(url, fields):
     """Translate a submission, or return None if no rule claims it."""
     for form in rules.FORMS:
-        if _pattern(form).search(url):
+        if _pattern(form["url"]).search(url):
             return _apply_form(form, fields)
     action = _scalar(fields.get("action"))
     if isinstance(action, str) and _DELETE_ACTION.match(action):
