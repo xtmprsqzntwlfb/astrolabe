@@ -37,6 +37,7 @@ ENVIRONMENT = (
     ("$OS_COMPUTE_API", "https://your-cloud/compute/v2.1"),
     ("$OS_VOLUME_API", "https://your-cloud/volume/v3/$OS_PROJECT_ID"),
     ("$OS_NETWORK_API", "https://your-cloud:9696/v2.0"),
+    ("$OS_IDENTITY_API", "https://your-cloud:5000/v3"),
 )
 
 

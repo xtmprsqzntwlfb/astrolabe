@@ -35,6 +35,7 @@ from importlib import import_module
 COMPUTE = "$OS_COMPUTE_API"
 VOLUME = "$OS_VOLUME_API"
 NETWORK = "$OS_NETWORK_API"
+IDENTITY = "$OS_IDENTITY_API"
 
 
 # --------------------------------------------------------------- field kinds
@@ -158,6 +159,77 @@ FORMS = [
             arg("name"),
         ],
     },
+    {
+        "id": "project-create",
+        "title": "Create project",
+        # Projects are the identity dashboard's default panel, so the panel
+        # slug does not appear in the path.
+        "url": r"/identity/create/?$",
+        "form": "openstack_dashboard.dashboards.identity.projects.workflows"
+                ":CreateProjectInfoAction",
+        "method": "POST",
+        "endpoint": IDENTITY + "/projects",
+        "envelope": "project",
+        "command": ["openstack", "project", "create"],
+        "fields": [
+            # The form shows domain_name and submits domain_id; only the id
+            # means anything to the API, and --domain accepts either.
+            opt("domain_id", "--domain"),
+            opt("description", "--description"),
+            # Ships ticked. Only the unticked case needs saying.
+            boolean("enabled", "enabled", off="--disable"),
+            arg("name"),
+        ],
+    },
+    {
+        "id": "domain-create",
+        "title": "Create domain",
+        "url": r"/identity/domains/create/?$",
+        "form": "openstack_dashboard.dashboards.identity.domains.workflows"
+                ":CreateDomainInfoAction",
+        "method": "POST",
+        "endpoint": IDENTITY + "/domains",
+        "envelope": "domain",
+        "command": ["openstack", "domain", "create"],
+        "fields": [
+            opt("description", "--description"),
+            boolean("enabled", "enabled", off="--disable"),
+            arg("name"),
+        ],
+    },
+    {
+        "id": "group-create",
+        "title": "Create group",
+        "url": r"/identity/groups/create/?$",
+        "form": "openstack_dashboard.dashboards.identity.groups.forms"
+                ":CreateGroupForm",
+        "method": "POST",
+        "endpoint": IDENTITY + "/groups",
+        "envelope": "group",
+        "command": ["openstack", "group", "create"],
+        "fields": [
+            opt("description", "--description"),
+            arg("name"),
+        ],
+    },
+    {
+        "id": "role-create",
+        "title": "Create role",
+        # Only reachable when ANGULAR_FEATURES['roles_panel'] is False. It
+        # defaults to True, in which case the panel POSTs to /api/* instead
+        # and this rule simply never matches. It is here because the flag can
+        # be turned off today, and because the Angular panel is on its way out.
+        "url": r"/identity/roles/create/?$",
+        "form": "openstack_dashboard.dashboards.identity.roles.forms"
+                ":CreateRoleForm",
+        "method": "POST",
+        "endpoint": IDENTITY + "/roles",
+        "envelope": "role",
+        "command": ["openstack", "role", "create"],
+        "fields": [
+            arg("name"),
+        ],
+    },
 ]
 
 # Horizon encodes table actions as "<table>__<action>[__<id>]" in a field named
@@ -167,6 +239,12 @@ TABLES = {
     "flavors": {"noun": "flavor", "path": COMPUTE + "/flavors"},
     "volume_types": {"noun": "volume type", "path": VOLUME + "/types"},
     "networks": {"noun": "network", "path": NETWORK + "/networks"},
+    # Horizon still calls the project table "tenants", the pre-Keystone-v3
+    # name. The CLI noun and the API path are both "project".
+    "tenants": {"noun": "project", "path": IDENTITY + "/projects"},
+    "domains": {"noun": "domain", "path": IDENTITY + "/domains"},
+    "groups": {"noun": "group", "path": IDENTITY + "/groups"},
+    "roles": {"noun": "role", "path": IDENTITY + "/roles"},
 }
 
 

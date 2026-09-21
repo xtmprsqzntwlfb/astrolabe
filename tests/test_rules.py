@@ -296,6 +296,76 @@ class TestTranslate(unittest.TestCase):
         self.assertIs(body["admin_state_up"], False)
         self.assertNotIn("availability_zone_hints", body)
 
+    def test_project_create_carries_the_domain_id_not_the_domain_name(self):
+        out = translate.translate("/identity/create", {
+            "name": "engineering", "domain_id": "d-1", "domain_name": "Default",
+            "description": "R&D", "enabled": "on",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack project create --domain d-1 --description 'R&D' "
+            "engineering")
+        body = out["calls"][0]["body"]["project"]
+        self.assertEqual(body["domain_id"], "d-1")
+        self.assertIs(body["enabled"], True)
+        self.assertNotIn("domain_name", body)
+
+    def test_an_unticked_project_is_created_disabled(self):
+        out = translate.translate("/identity/create",
+                                  {"name": "dormant", "domain_id": "d-1"})
+        self.assertEqual(
+            out["cli"], "openstack project create --domain d-1 --disable "
+                        "dormant")
+        self.assertIs(out["calls"][0]["body"]["project"]["enabled"], False)
+
+    def test_domain_create_needs_no_domain_of_its_own(self):
+        out = translate.translate("/identity/domains/create", {
+            "name": "partners", "description": "Third parties",
+            "enabled": "on",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack domain create --description 'Third parties' partners")
+        self.assertEqual(out["calls"][0]["body"]["domain"]["name"], "partners")
+
+    def test_group_create_renders_name_and_description(self):
+        out = translate.translate("/identity/groups/create", {
+            "name": "operators", "description": "On call",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack group create --description 'On call' operators")
+
+    def test_role_create_is_nothing_but_a_name(self):
+        out = translate.translate("/identity/roles/create", {"name": "auditor"})
+        self.assertEqual(out["cli"], "openstack role create auditor")
+        self.assertEqual(out["calls"][0]["body"]["role"], {"name": "auditor"})
+
+    def test_each_identity_url_reaches_its_own_rule(self):
+        """The identity paths nest, so the patterns must not poach.
+
+        ``/identity/create`` is the project form because projects are the
+        dashboard's default panel; every other panel adds a slug.
+        """
+        expected = {
+            "/identity/create": "openstack project create",
+            "/identity/domains/create": "openstack domain create",
+            "/identity/groups/create": "openstack group create",
+            "/identity/roles/create": "openstack role create",
+        }
+        for url, prefix in expected.items():
+            with self.subTest(url=url):
+                out = translate.translate(url, {"name": "x"})
+                self.assertTrue(out["cli"].startswith(prefix), out["cli"])
+
+    def test_project_deletes_come_from_horizons_tenants_table(self):
+        out = translate.translate("/identity/", {
+            "action": "tenants__delete", "object_ids": ["p1", "p2"],
+        })
+        self.assertEqual(out["cli"], "openstack project delete p1 p2")
+        self.assertTrue(out["calls"][0]["url"].endswith("/projects/p1"))
+        self.assertEqual(out["title"], "Delete projects (2)")
+
     def test_row_delete_uses_the_id_in_the_action_field(self):
         out = translate.translate("/admin/flavors/",
                                   {"action": "flavors__delete__abc-1"})

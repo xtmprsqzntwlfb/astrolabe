@@ -114,8 +114,8 @@ carry the operator's actual input rather than a proxy's reshaping of it.
 What v1 covers
 ==============
 
-Three admin panels, chosen because they are unambiguously admin-scoped (no
-policy or project-scoping subtleties) and have flat, well-understood forms:
+Panels chosen because they are unambiguously admin-scoped (no policy or
+project-scoping subtleties) and have flat, well-understood forms:
 
 ============================== ====================================
 Action                         Rendered as
@@ -123,12 +123,22 @@ Action                         Rendered as
 Create flavor                  ``openstack flavor create``
 Create volume type             ``openstack volume type create``
 Create network (admin)         ``openstack network create``
-Delete, on any of those three  ``openstack <resource> delete``
+Create project                 ``openstack project create``
+Create domain                  ``openstack domain create``
+Create group                   ``openstack group create``
+Create role                    ``openstack role create``
+Delete, on any of the above    ``openstack <resource> delete``
 ============================== ====================================
 
 Deletes are handled by one generic rule that decodes Horizon's
 ``<table>__<action>__<id>`` action encoding, so row actions and multi-select
 batch deletes both work.
+
+Roles are the exception to "it just works": Horizon ships the roles panel as
+its AngularJS variant by default (``ANGULAR_FEATURES['roles_panel']``), and
+that variant POSTs to ``/api/*`` rather than submitting a Django form. The rule
+is present and correct, and starts recording the moment that flag is off —
+which is also what happens when the Angular panel is eventually removed.
 
 Each entry renders two things: the ``openstack`` command, and the equivalent
 REST call as ``curl``.
@@ -143,6 +153,7 @@ screenshotted into tickets. They reference shell variables you set once::
     export OS_COMPUTE_API=https://your-cloud/compute/v2.1
     export OS_VOLUME_API=https://your-cloud/volume/v3/$OS_PROJECT_ID
     export OS_NETWORK_API=https://your-cloud:9696/v2.0
+    export OS_IDENTITY_API=https://your-cloud:5000/v3
 
 The ``openstack`` commands themselves need none of these; they use your usual
 ``clouds.yaml`` or ``OS_*`` credentials. The variables are only for the
@@ -417,7 +428,7 @@ That layer includes a test that deliberately stages a renamed field and asserts
 Known limits
 ============
 
-* Only the four actions listed above are recognised. Everything else is
+* Only the actions listed above are recognised. Everything else is
   silently ignored, by design.
 * There is no copy button, because there is no JavaScript. Select the text, or
   use **Download as shell script** for the whole log at once.
