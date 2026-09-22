@@ -43,7 +43,7 @@ from astrolabe import rules  # noqa: E402
 from astrolabe import store  # noqa: E402
 from astrolabe import translate  # noqa: E402
 
-KINDS = {"value", "flag", "multi", "positional"}
+KINDS = {"value", "flag", "multi", "positional", "redacted"}
 
 
 class Post(dict):
@@ -114,10 +114,24 @@ class TestRuleSet(unittest.TestCase):
                 self.assertEqual(len(positionals), 1)
 
     def test_api_keys_do_not_collide(self):
+        # Redacted fields have no api key at all: they contribute nothing to
+        # the REST body, on purpose.
         for form in rules.FORMS:
-            keys = [field["api"] for field in form["fields"]]
+            keys = [field["api"] for field in form["fields"]
+                    if "api" in field]
             with self.subTest(form["id"]):
                 self.assertEqual(len(keys), len(set(keys)))
+
+    def test_redacted_fields_carry_no_api_key(self):
+        for form in rules.FORMS:
+            for field in form["fields"]:
+                if field["kind"] != "redacted":
+                    continue
+                with self.subTest(form["id"], field=field["field"]):
+                    self.assertNotIn("api", field)
+                    # The whole point is that the name is one read_fields
+                    # refuses to read.
+                    self.assertTrue(translate.is_secret(field["field"]))
 
     def test_booleans_emit_at_least_one_flag(self):
         # A boolean with neither an on nor an off flag would silently affect
@@ -341,6 +355,46 @@ class TestTranslate(unittest.TestCase):
         self.assertEqual(out["cli"], "openstack role create auditor")
         self.assertEqual(out["calls"][0]["body"]["role"], {"name": "auditor"})
 
+    def test_user_create_prompts_for_the_password_it_never_read(self):
+        out = translate.translate("/identity/users/create/", {
+            "name": "alice", "domain_id": "d-1", "project": "p-1",
+            "email": "alice@example.com", "description": "SRE",
+            "enabled": "on",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack user create --domain d-1 --project p-1 "
+            "--email alice@example.com --description SRE --password-prompt "
+            "alice")
+        body = out["calls"][0]["body"]["user"]
+        self.assertEqual(body["default_project_id"], "p-1")
+        self.assertIs(body["enabled"], True)
+        self.assertNotIn("password", body)
+
+    def test_a_submitted_password_survives_nowhere(self):
+        """The end-to-end path, not just the rule: read_fields then translate.
+
+        Passing the raw submission through both is the only version of this
+        test that would notice the secret filter being loosened.
+        """
+        out = translate.translate(
+            "/identity/users/create/",
+            translate.read_fields({
+                "name": ["alice"], "domain_id": ["d-1"],
+                "password": ["hunter2"], "confirm_password": ["hunter2"],
+                "csrfmiddlewaretoken": ["abcdef"],
+            }))
+        rendered = out["cli"] + json.dumps(out["calls"])
+        self.assertNotIn("hunter2", rendered)
+        self.assertNotIn("abcdef", rendered)
+        self.assertIn("--password-prompt", out["cli"])
+
+    def test_the_prompt_flag_appears_even_with_nothing_submitted(self):
+        # A dropped field and an empty one are indistinguishable here, so the
+        # flag has to be unconditional or it would be unreliable.
+        out = translate.translate("/identity/users/create/", {"name": "bob"})
+        self.assertIn("--password-prompt", out["cli"])
+
     def test_each_identity_url_reaches_its_own_rule(self):
         """The identity paths nest, so the patterns must not poach.
 
@@ -352,6 +406,7 @@ class TestTranslate(unittest.TestCase):
             "/identity/domains/create": "openstack domain create",
             "/identity/groups/create": "openstack group create",
             "/identity/roles/create": "openstack role create",
+            "/identity/users/create/": "openstack user create",
         }
         for url, prefix in expected.items():
             with self.subTest(url=url):

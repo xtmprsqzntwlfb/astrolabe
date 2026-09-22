@@ -154,6 +154,12 @@ def _apply_form(spec, fields):
             if values:
                 body[field["api"]] = values
 
+        elif kind == "redacted":
+            # read_fields dropped the value before it reached us, so there is
+            # nothing to render and nothing to put in the body. The flag makes
+            # the command ask for it instead. See rules.redacted().
+            parts.append(field["flag"])
+
         elif kind == "positional":
             raw = _scalar(raw)
             if _blank(raw):

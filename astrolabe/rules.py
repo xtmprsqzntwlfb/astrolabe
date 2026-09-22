@@ -84,6 +84,26 @@ def arg(field, api="name"):
     return {"kind": "positional", "field": field, "api": api}
 
 
+def redacted(field, flag):
+    """Stands in for a field Astrolabe deliberately never reads.
+
+    ``translate.read_fields`` drops password-like names before the interpreter
+    sees them, so a rule cannot know what was typed — only that the form has
+    such a field. Emitting a prompting flag is the honest rendering: the
+    command asks for the value when it runs, rather than quietly creating a
+    user nobody can log in as.
+
+    The flag is unconditional, because absence proves nothing here: a dropped
+    field and an empty one look identical from this side. Use it only for
+    fields the form requires.
+
+    Nothing reaches the REST body — there is no value to put there, and a
+    placeholder inside the single-quoted ``curl -d`` payload would not expand.
+    The field name is kept so :func:`validate` goes on checking it exists.
+    """
+    return {"kind": "redacted", "field": field, "flag": flag}
+
+
 # --------------------------------------------------------------------- rules
 #
 # ``form`` names the Horizon class this rule was written against, as
@@ -213,6 +233,32 @@ FORMS = [
         ],
     },
     {
+        "id": "user-create",
+        "title": "Create user",
+        "url": r"/identity/users/create/?$",
+        "form": "openstack_dashboard.dashboards.identity.users.forms"
+                ":CreateUserForm",
+        "method": "POST",
+        "endpoint": IDENTITY + "/users",
+        "envelope": "user",
+        "command": ["openstack", "user", "create"],
+        # Four form fields are deliberately unmapped, and uncovered() lists
+        # them: confirm_password (never read), domain_name (display only,
+        # domain_id is submitted beside it), role_id (Horizon assigns the role
+        # in a second API call, which one command cannot express) and
+        # lock_password (lives under a nested "options" key this DSL has no
+        # way to build).
+        "fields": [
+            opt("domain_id", "--domain"),
+            opt("project", "--project", api="default_project_id"),
+            opt("email", "--email"),
+            opt("description", "--description"),
+            redacted("password", "--password-prompt"),
+            boolean("enabled", "enabled", off="--disable"),
+            arg("name"),
+        ],
+    },
+    {
         "id": "role-create",
         "title": "Create role",
         # Only reachable when ANGULAR_FEATURES['roles_panel'] is False. It
@@ -245,6 +291,7 @@ TABLES = {
     "domains": {"noun": "domain", "path": IDENTITY + "/domains"},
     "groups": {"noun": "group", "path": IDENTITY + "/groups"},
     "roles": {"noun": "role", "path": IDENTITY + "/roles"},
+    "users": {"noun": "user", "path": IDENTITY + "/users"},
 }
 
 

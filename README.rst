@@ -127,6 +127,7 @@ Create project                 ``openstack project create``
 Create domain                  ``openstack domain create``
 Create group                   ``openstack group create``
 Create role                    ``openstack role create``
+Create user                    ``openstack user create``
 Delete, on any of the above    ``openstack <resource> delete``
 ============================== ====================================
 
@@ -373,7 +374,7 @@ Extending the rule table
 
 Adding a panel means adding one entry to ``FORMS`` in ``astrolabe/rules.py``.
 Nothing else changes. A rule names the URL it matches, the command and
-endpoint it maps to, and the fields it carries. Four field kinds cover
+endpoint it maps to, and the fields it carries. Five field kinds cover
 everything so far:
 
 ``opt(field, flag, api, cast, omit_when, absent_when)``
@@ -394,6 +395,15 @@ everything so far:
 
 ``arg(field, api)``
     A positional argument. Always rendered last, as the CLI expects.
+
+``redacted(field, flag)``
+    Stands in for a field Astrolabe refuses to read. The secret filter drops
+    password-like names before the interpreter runs, so the rule emits a
+    prompting flag instead of a value — ``--password-prompt`` rather than a
+    silently absent password. The flag is unconditional, because a dropped
+    field and an empty one look identical from here, so use it only for fields
+    the form requires. Nothing reaches the REST body. The field name is still
+    recorded, so ``validate()`` keeps checking it exists.
 
 Set ``form`` to the Horizon class the rule targets, as
 ``"module:ClassName"``. That is what lets ``validate()`` check the rule against
@@ -452,6 +462,13 @@ Known limits
   are not recorded — creates or deletes. Of the panels Astrolabe knows about,
   ``roles_panel`` defaults to Angular and ``flavors_panel`` does not; see the
   note under *What v1 covers* for how to switch a panel back.
+* **Create user is deliberately incomplete in two places.** Astrolabe never
+  reads the password, so the command ends up with ``--password-prompt`` and the
+  ``curl`` body has no password in it at all — the CLI form asks you at run
+  time, the REST form you must fill in yourself. Horizon also assigns the
+  primary role in a second API call, which one command cannot express, so the
+  recorded ``openstack user create`` leaves the new user unroled. Add the
+  matching ``openstack role add`` yourself.
 * Rendered commands reproduce what was submitted. They are a starting point for
   a script, not a tested one — read them before you run them.
 * The ``curl`` equivalents target the real service APIs, not Horizon's proxy, so
