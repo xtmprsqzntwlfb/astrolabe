@@ -134,11 +134,24 @@ Deletes are handled by one generic rule that decodes Horizon's
 ``<table>__<action>__<id>`` action encoding, so row actions and multi-select
 batch deletes both work.
 
-Roles are the exception to "it just works": Horizon ships the roles panel as
+Roles are the exception to "it just works". Horizon ships the roles panel as
 its AngularJS variant by default (``ANGULAR_FEATURES['roles_panel']``), and
-that variant POSTs to ``/api/*`` rather than submitting a Django form. The rule
-is present and correct, and starts recording the moment that flag is off —
-which is also what happens when the Angular panel is eventually removed.
+that variant POSTs to ``/api/*`` rather than submitting a Django form, so
+**neither creates nor deletes are recorded there** — in that mode the Django
+create view is not even routed. The rules are present and correct, and start
+recording as soon as the panel is the Django one, which is also what happens
+when the Angular variant is eventually removed upstream.
+
+To opt in now, drop a file in ``local_settings.d`` and restart::
+
+    cat > ../horizon/openstack_dashboard/local/local_settings.d/_11_toggle_angular_features.py <<'EOF'
+    ANGULAR_FEATURES.update({'roles_panel': False})
+    EOF
+
+That switches the panel to the legacy Django UI, which looks different from the
+Angular one. It is a deployment choice, not something Astrolabe requires — the
+plugin can only observe form submissions, so it records exactly the panels that
+are not Angular. ``images_panel`` defaults to Angular for the same reason.
 
 Each entry renders two things: the ``openstack`` command, and the equivalent
 REST call as ``curl``.
@@ -434,9 +447,11 @@ Known limits
   use **Download as shell script** for the whole log at once.
 * The panel shows what you have already done; it does not appear beside the
   form you are filling in. Do your work, then go and collect the commands.
-* Panels switched to their AngularJS variants via ``ANGULAR_FEATURES`` (flavors
-  has one) POST JSON to Horizon's ``/api/*`` proxy instead of submitting a
-  Django form, and are not recorded.
+* Panels switched to their AngularJS variants via ``ANGULAR_FEATURES`` POST
+  JSON to Horizon's ``/api/*`` proxy instead of submitting a Django form, and
+  are not recorded — creates or deletes. Of the panels Astrolabe knows about,
+  ``roles_panel`` defaults to Angular and ``flavors_panel`` does not; see the
+  note under *What v1 covers* for how to switch a panel back.
 * Rendered commands reproduce what was submitted. They are a starting point for
   a script, not a tested one — read them before you run them.
 * The ``curl`` equivalents target the real service APIs, not Horizon's proxy, so
