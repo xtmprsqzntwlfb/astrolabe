@@ -448,6 +448,14 @@ To include layer 4, run it with the interpreter that has Horizon on its path::
 That layer includes a test that deliberately stages a renamed field and asserts
 ``validate()`` reports it, so the safety net cannot pass vacuously.
 
+CI (``.github/workflows/ci.yml``) runs flake8, then the suite twice on each of
+Python 3.9 through 3.13 — once on a bare interpreter, which is what keeps the
+"needs nothing" claim above honest, and again with Django installed to pick up
+layer 3. It also builds a wheel and checks the template and the enabled file
+are inside it. **Layer 4 is not in CI**: it needs a Horizon checkout and would
+pin one Horizon version, so a green run says nothing about whether the rules
+still match upstream. Run it locally after a Horizon upgrade.
+
 Known limits
 ============
 

@@ -1,0 +1,95 @@
+# What this does not cover: layer 4 of the suite, which checks every rule
+# against the Horizon form class it targets. That needs a Horizon checkout and
+# would pin one Horizon version, so it stays a local step -- see "Tests" in the
+# README. A green run here does not promise the rules still match upstream.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # hacking supplies the H-codes that setup.cfg names in
+      # enable-extensions, and brings its own compatible flake8. Without it
+      # flake8 accepts the config and quietly checks nothing for those codes.
+      - run: pip install hacking
+      - run: flake8 .
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Layers 1 and 2 on a bare interpreter, before anything is installed.
+      # This tests a design goal rather than just the code: rules.py and
+      # translate.py must not reach for Django or Horizon at import time, and
+      # the suite must need no test runner.
+      - name: Tests with nothing installed
+        run: python tests/test_rules.py
+
+      # 4.2 is Horizon's era, and Django 5 has dropped Python 3.9.
+      - name: Install Django
+        run: pip install 'Django~=4.2'
+
+      # The middleware layer skips itself when Django is absent, so a failed
+      # install above would leave this job green while testing less than it
+      # appears to. Fail loudly instead of silently skipping.
+      - name: Check Django imports, so the middleware layer cannot skip
+        run: python -c "import django; print(django.get_version())"
+
+      - name: Tests with Django, which adds the middleware layer
+        run: python tests/test_rules.py
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip wheel --no-deps -w dist .
+
+      # package_data and MANIFEST.in have drifted before. A plugin whose
+      # template or enabled file is missing from the wheel installs cleanly
+      # and then fails in the dashboard, which is the worst place to find out.
+      - name: Check the wheel carries the template and the enabled file
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+          import zipfile
+
+          wheel = glob.glob('dist/*.whl')[0]
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = {
+              'astrolabe/templates/astrolabe/index.html',
+              'astrolabe/enabled/_9020_astrolabe.py',
+              'astrolabe/middleware.py',
+              'astrolabe/rules.py',
+              'astrolabe/translate.py',
+          }
+          missing = sorted(required - names)
+          if missing:
+              sys.exit('%s is missing: %s' % (wheel, ', '.join(missing)))
+          print('%s carries all %d expected files' % (wheel, len(required)))
+          PY
