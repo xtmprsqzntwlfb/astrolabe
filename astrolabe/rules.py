@@ -265,8 +265,11 @@ FORMS = [
         # them: confirm_password (never read), domain_name (display only,
         # domain_id is submitted beside it), role_id (Horizon assigns the role
         # in a second API call, which one command cannot express) and
-        # lock_password (lives under a nested "options" key this DSL has no
-        # way to build).
+        # lock_password, which is a checkbox rather than a credential but
+        # whose name matches the secret filter, so read_fields drops it before
+        # a rule could see it. Narrowing that filter to let one boolean
+        # through is a bad trade: the cost of getting it wrong is a leaked
+        # password, and the gain is --enable-lock-password.
         "fields": [
             opt("domain_id", "--domain"),
             opt("project", "--project", api="default_project_id"),
