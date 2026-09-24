@@ -180,6 +180,25 @@ FORMS = [
         ],
     },
     {
+        "id": "aggregate-create",
+        "title": "Create host aggregate",
+        "url": r"/admin/aggregates/create/?$",
+        "form": "openstack_dashboard.dashboards.admin.aggregates.workflows"
+                ":SetAggregateInfoAction",
+        "method": "POST",
+        "endpoint": COMPUTE + "/os-aggregates",
+        "envelope": "aggregate",
+        "command": ["openstack", "aggregate", "create"],
+        # The workflow's second step adds hosts, through a separate action
+        # class and a separate API call per host. That is beyond a rule, which
+        # describes one form and one command; the recorded command creates an
+        # empty aggregate. See Known limits.
+        "fields": [
+            opt("availability_zone", "--zone"),
+            arg("name"),
+        ],
+    },
+    {
         "id": "project-create",
         "title": "Create project",
         # Projects are the identity dashboard's default panel, so the panel
@@ -285,6 +304,8 @@ TABLES = {
     "flavors": {"noun": "flavor", "path": COMPUTE + "/flavors"},
     "volume_types": {"noun": "volume type", "path": VOLUME + "/types"},
     "networks": {"noun": "network", "path": NETWORK + "/networks"},
+    "host_aggregates": {"noun": "aggregate",
+                        "path": COMPUTE + "/os-aggregates"},
     # Horizon still calls the project table "tenants", the pre-Keystone-v3
     # name. The CLI noun and the API path are both "project".
     "tenants": {"noun": "project", "path": IDENTITY + "/projects"},

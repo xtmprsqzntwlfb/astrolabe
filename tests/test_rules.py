@@ -310,6 +310,27 @@ class TestTranslate(unittest.TestCase):
         self.assertIs(body["admin_state_up"], False)
         self.assertNotIn("availability_zone_hints", body)
 
+    def test_aggregate_create_maps_the_availability_zone(self):
+        out = translate.translate("/admin/aggregates/create/", {
+            "name": "gpu-nodes", "availability_zone": "az-gpu",
+        })
+        self.assertEqual(
+            out["cli"], "openstack aggregate create --zone az-gpu gpu-nodes")
+        self.assertEqual(out["calls"][0]["body"]["aggregate"],
+                         {"availability_zone": "az-gpu", "name": "gpu-nodes"})
+
+    def test_an_aggregate_without_a_zone_omits_the_flag(self):
+        out = translate.translate("/admin/aggregates/create/",
+                                  {"name": "spare"})
+        self.assertEqual(out["cli"], "openstack aggregate create spare")
+
+    def test_aggregate_deletes_use_horizons_host_aggregates_table(self):
+        out = translate.translate("/admin/aggregates/", {
+            "action": "host_aggregates__delete__7",
+        })
+        self.assertEqual(out["cli"], "openstack aggregate delete 7")
+        self.assertTrue(out["calls"][0]["url"].endswith("/os-aggregates/7"))
+
     def test_project_create_carries_the_domain_id_not_the_domain_name(self):
         out = translate.translate("/identity/create", {
             "name": "engineering", "domain_id": "d-1", "domain_name": "Default",

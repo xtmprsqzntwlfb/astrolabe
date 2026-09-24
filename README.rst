@@ -128,6 +128,7 @@ Create domain                  ``openstack domain create``
 Create group                   ``openstack group create``
 Create role                    ``openstack role create``
 Create user                    ``openstack user create``
+Create host aggregate          ``openstack aggregate create``
 Delete, on any of the above    ``openstack <resource> delete``
 ============================== ====================================
 
@@ -477,6 +478,11 @@ Known limits
   primary role in a second API call, which one command cannot express, so the
   recorded ``openstack user create`` leaves the new user unroled. Add the
   matching ``openstack role add`` yourself.
+* **Create host aggregate records only the first step.** The workflow's
+  second step adds hosts, through a separate action class and one API call
+  per host, which a rule describing one form and one command cannot express.
+  The recorded command creates an empty aggregate; add the matching
+  ``openstack aggregate add host`` calls yourself.
 * Rendered commands reproduce what was submitted. They are a starting point for
   a script, not a tested one — read them before you run them.
 * The ``curl`` equivalents target the real service APIs, not Horizon's proxy, so
