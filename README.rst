@@ -129,6 +129,7 @@ Create group                   ``openstack group create``
 Create role                    ``openstack role create``
 Create user                    ``openstack user create``
 Create host aggregate          ``openstack aggregate create``
+Create router                  ``openstack router create``
 Delete, on any of the above    ``openstack <resource> delete``
 ============================== ====================================
 
@@ -375,7 +376,7 @@ Extending the rule table
 
 Adding a panel means adding one entry to ``FORMS`` in ``astrolabe/rules.py``.
 Nothing else changes. A rule names the URL it matches, the command and
-endpoint it maps to, and the fields it carries. Five field kinds cover
+endpoint it maps to, and the fields it carries. Six field kinds cover
 everything so far:
 
 ``opt(field, flag, api, cast, omit_when, absent_when)``
@@ -393,6 +394,14 @@ everything so far:
 
 ``repeated(field, flag, api)``
     A multi-select, emitted as the flag once per value.
+
+``choice(field, api, choices)``
+    A select where each option carries its own flag and its own API value.
+    ``choices`` maps the submitted value to ``(flag, api_value)``; a submitted
+    value the map does not mention emits nothing and writes nothing. That is
+    how Horizon's "Use Server Default" options behave — the router form sends
+    ``distributed`` only once centralized or distributed has been picked — so
+    leaving the sentinel out of the map is all a rule has to say.
 
 ``arg(field, api)``
     A positional argument. Always rendered last, as the CLI expects.
@@ -478,6 +487,10 @@ Known limits
   primary role in a second API call, which one command cannot express, so the
   recorded ``openstack user create`` leaves the new user unroled. Add the
   matching ``openstack role add`` yourself.
+* **Create router does not record Enable SNAT.** Horizon sends it only when
+  a gateway network was chosen too, nested beside the network id, and a rule
+  cannot make one field depend on another. Unticking it is invisible here, so
+  add ``--disable-snat`` yourself if you meant it.
 * **Create host aggregate records only the first step.** The workflow's
   second step adds hosts, through a separate action class and one API call
   per host, which a rule describing one form and one command cannot express.

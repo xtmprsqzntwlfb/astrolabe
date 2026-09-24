@@ -110,6 +110,20 @@ def _as_list(value):
 # ---------------------------------------------------------------- the rules
 
 
+def _put(body, path, value):
+    """Set a body key, building nested dicts for a dotted path.
+
+    Neutron nests a router's gateway under ``external_gateway_info``, so a
+    rule spells that key "external_gateway_info.network_id" rather than
+    needing a field kind of its own. Undotted keys, which is nearly all of
+    them, take the same path and land at the top level.
+    """
+    keys = path.split(".")
+    for key in keys[:-1]:
+        body = body.setdefault(key, {})
+    body[keys[-1]] = value
+
+
 def _apply_form(spec, fields):
     """Apply one form rule to a submission.
 
@@ -137,7 +151,7 @@ def _apply_form(spec, fields):
                 parts += [field["flag"], shq(raw)]
             value = _cast(raw, field["cast"])
             if value is not None:
-                body[field["api"]] = value
+                _put(body, field["api"], value)
 
         elif kind == "flag":
             on = _checked(raw)
@@ -145,14 +159,26 @@ def _apply_form(spec, fields):
                 parts.append(field["on"])
             elif not on and field["off"]:
                 parts.append(field["off"])
-            body[field["api"]] = on
+            _put(body, field["api"], on)
+
+        elif kind == "choice":
+            # A select where each option is its own flag, and anything not
+            # listed means "leave it to the server": Horizon's router form
+            # offers centralized/distributed/server_default and sends the
+            # "distributed" key only for the first two. Absence from the map
+            # is the sentinel, so a rule does not have to name it.
+            picked = field["choices"].get(str(_scalar(raw)))
+            if picked is not None:
+                if picked["flag"]:
+                    parts.append(picked["flag"])
+                _put(body, field["api"], picked["value"])
 
         elif kind == "multi":
             values = [str(one) for one in _as_list(raw) if not _blank(one)]
             for one in values:
                 parts += [field["flag"], shq(one)]
             if values:
-                body[field["api"]] = values
+                _put(body, field["api"], values)
 
         elif kind == "redacted":
             # read_fields dropped the value before it reached us, so there is
@@ -165,7 +191,7 @@ def _apply_form(spec, fields):
             if _blank(raw):
                 continue
             trailing.append(shq(raw))
-            body[field["api"]] = str(raw)
+            _put(body, field["api"], str(raw))
             subject = str(raw)
 
     return {

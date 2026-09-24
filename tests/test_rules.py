@@ -43,7 +43,8 @@ from astrolabe import rules  # noqa: E402
 from astrolabe import store  # noqa: E402
 from astrolabe import translate  # noqa: E402
 
-KINDS = {"value", "flag", "multi", "positional", "redacted"}
+KINDS = {"value", "flag", "multi", "positional", "redacted",
+         "choice"}
 
 
 class Post(dict):
@@ -121,6 +122,33 @@ class TestRuleSet(unittest.TestCase):
                     if "api" in field]
             with self.subTest(form["id"]):
                 self.assertEqual(len(keys), len(set(keys)))
+
+    def test_no_api_key_is_nested_under_another(self):
+        # _put walks a dotted path with setdefault, so a rule writing both
+        # "gateway" and "gateway.id" would hit a string where it wanted a
+        # dict and raise. Catch that here rather than on a live submission.
+        for form in rules.FORMS:
+            keys = {field["api"] for field in form["fields"]
+                    if "api" in field}
+            for key in keys:
+                parents = {".".join(key.split(".")[:n])
+                           for n in range(1, key.count(".") + 1)}
+                with self.subTest(form["id"], key=key):
+                    self.assertFalse(parents & keys)
+
+    def test_choices_map_to_distinct_flags(self):
+        # Two options sharing a flag would render the same command for two
+        # different bodies, which is exactly the confusion Astrolabe exists
+        # to remove.
+        for form in rules.FORMS:
+            for field in form["fields"]:
+                if field["kind"] != "choice":
+                    continue
+                flags = [one["flag"] for one in field["choices"].values()
+                         if one["flag"]]
+                with self.subTest(form["id"], field=field["field"]):
+                    self.assertTrue(flags)
+                    self.assertEqual(len(flags), len(set(flags)))
 
     def test_redacted_fields_carry_no_api_key(self):
         for form in rules.FORMS:
@@ -330,6 +358,75 @@ class TestTranslate(unittest.TestCase):
         })
         self.assertEqual(out["cli"], "openstack aggregate delete 7")
         self.assertTrue(out["calls"][0]["url"].endswith("/os-aggregates/7"))
+
+    def test_router_create_maps_every_field_it_covers(self):
+        out = translate.translate("/admin/routers/create/", {
+            "name": "edge-r1", "tenant_id": "p-9", "admin_state_up": "on",
+            "external_network": "net-ext", "mode": "distributed",
+            "ha": "enabled", "az_hints": ["az1", "az2"],
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack router create --project p-9 "
+            "--external-gateway net-ext --distributed --ha "
+            "--availability-zone-hint az1 --availability-zone-hint az2 "
+            "edge-r1")
+        self.assertEqual(out["calls"][0]["body"]["router"], {
+            "tenant_id": "p-9",
+            "admin_state_up": True,
+            "external_gateway_info": {"network_id": "net-ext"},
+            "distributed": True,
+            "ha": True,
+            "availability_zone_hints": ["az1", "az2"],
+            "name": "edge-r1",
+        })
+
+    def test_router_server_defaults_send_no_key_and_no_flag(self):
+        # Horizon omits distributed and ha entirely on the sentinel, so a
+        # rendered command that named either would be a different request.
+        out = translate.translate("/admin/routers/create/", {
+            "name": "plain", "mode": "server_default",
+            "ha": "server_default", "admin_state_up": "on",
+        })
+        self.assertEqual(
+            out["cli"], "openstack router create plain")
+        body = out["calls"][0]["body"]["router"]
+        self.assertNotIn("distributed", body)
+        self.assertNotIn("ha", body)
+
+    def test_router_centralized_and_no_ha_are_not_silence(self):
+        # The other half of the sentinel: picking centralized is a real
+        # choice and has to reach both the command and the body as False.
+        out = translate.translate("/admin/routers/create/", {
+            "name": "legacy", "mode": "centralized", "ha": "disabled",
+            "admin_state_up": "on",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack router create --centralized --no-ha legacy")
+        body = out["calls"][0]["body"]["router"]
+        self.assertIs(body["distributed"], False)
+        self.assertIs(body["ha"], False)
+
+    def test_a_router_without_a_gateway_grows_no_nested_key(self):
+        out = translate.translate("/admin/routers/create/", {
+            "name": "internal", "external_network": "",
+            "mode": "server_default", "ha": "server_default",
+        })
+        self.assertEqual(
+            out["cli"], "openstack router create --disable internal")
+        self.assertNotIn("external_gateway_info",
+                         out["calls"][0]["body"]["router"])
+
+    def test_router_deletes_come_from_the_routers_table(self):
+        out = translate.translate("/admin/routers/", {
+            "action": "routers__delete",
+            "object_ids": ["r-1", "r-2"],
+        })
+        self.assertEqual(out["cli"], "openstack router delete r-1 r-2")
+        self.assertEqual(
+            [call["url"].rsplit("/", 1)[-1] for call in out["calls"]],
+            ["r-1", "r-2"])
 
     def test_project_create_carries_the_domain_id_not_the_domain_name(self):
         out = translate.translate("/identity/create", {

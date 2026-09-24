@@ -40,7 +40,7 @@ IDENTITY = "$OS_IDENTITY_API"
 
 # --------------------------------------------------------------- field kinds
 #
-# Four kinds cover every rule below. Each describes one form field: how it
+# Six kinds cover every rule below. Each describes one form field: how it
 # reaches the command line, and how it reaches the REST body.
 
 
@@ -82,6 +82,27 @@ def repeated(field, flag, api):
 def arg(field, api="name"):
     """A positional argument. Always rendered last, as the CLI expects."""
     return {"kind": "positional", "field": field, "api": api}
+
+
+def choice(field, api, choices):
+    """A select where each option carries its own flag and its own API value.
+
+    ``choices`` maps the submitted value to ``(flag, api_value)``. A submitted
+    value the map does not mention emits nothing and writes nothing, which is
+    how Horizon's "Use Server Default" options behave: the router form sends
+    ``distributed`` only once the operator has picked centralized or
+    distributed. Leaving the sentinel out of the map says that, without the
+    rule having to name it.
+
+    Pass None as the flag for an option the CLI expresses by saying nothing.
+    """
+    return {
+        "kind": "choice", "field": field, "api": api,
+        "choices": {
+            value: {"flag": flag, "value": api_value}
+            for value, (flag, api_value) in choices.items()
+        },
+    }
 
 
 def redacted(field, flag):
@@ -199,6 +220,43 @@ FORMS = [
         ],
     },
     {
+        "id": "router-create",
+        "title": "Create router",
+        "url": r"/admin/routers/create/?$",
+        # The admin form subclasses the project one and adds tenant_id, so
+        # every field below except that one comes from project.routers.
+        "form": "openstack_dashboard.dashboards.admin.routers.forms"
+                ":CreateForm",
+        "method": "POST",
+        "endpoint": NETWORK + "/routers",
+        "envelope": "router",
+        "command": ["openstack", "router", "create"],
+        # enable_snat is deliberately unmapped. Horizon sends it only when a
+        # gateway network was also chosen, nested beside network_id, and a
+        # rule cannot make one field depend on another. Unticking it is
+        # therefore invisible here. See Known limits.
+        "fields": [
+            opt("tenant_id", "--project"),
+            # Defaults to up; absence means the operator unticked it.
+            boolean("admin_state_up", "admin_state_up", off="--disable"),
+            opt("external_network", "--external-gateway",
+                api="external_gateway_info.network_id"),
+            # Both of these offer "server_default", which Horizon reads as
+            # "send no key at all"; choice() expresses that by omission.
+            choice("mode", "distributed", {
+                "centralized": ("--centralized", False),
+                "distributed": ("--distributed", True),
+            }),
+            choice("ha", "ha", {
+                "enabled": ("--ha", True),
+                "disabled": ("--no-ha", False),
+            }),
+            repeated("az_hints", "--availability-zone-hint",
+                     "availability_zone_hints"),
+            arg("name"),
+        ],
+    },
+    {
         "id": "project-create",
         "title": "Create project",
         # Projects are the identity dashboard's default panel, so the panel
@@ -307,6 +365,7 @@ TABLES = {
     "flavors": {"noun": "flavor", "path": COMPUTE + "/flavors"},
     "volume_types": {"noun": "volume type", "path": VOLUME + "/types"},
     "networks": {"noun": "network", "path": NETWORK + "/networks"},
+    "routers": {"noun": "router", "path": NETWORK + "/routers"},
     "host_aggregates": {"noun": "aggregate",
                         "path": COMPUTE + "/os-aggregates"},
     # Horizon still calls the project table "tenants", the pre-Keystone-v3
