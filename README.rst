@@ -137,6 +137,7 @@ Deletes are handled by one generic rule that decodes Horizon's
 ``<table>__<action>__<id>`` action encoding, so row actions and multi-select
 batch deletes both work.
 
+
 Roles are the exception to "it just works". Horizon ships the roles panel as
 its AngularJS variant by default (``ANGULAR_FEATURES['roles_panel']``), and
 that variant POSTs to ``/api/*`` rather than submitting a Django form, so
@@ -158,6 +159,35 @@ are not Angular. ``images_panel`` defaults to Angular for the same reason.
 
 Each entry renders two things: the ``openstack`` command, and the equivalent
 REST call as ``curl``.
+
+Which dashboard a panel lives in
+--------------------------------
+
+Astrolabe records by *who is asking*, not by where they are: the middleware
+checks the operator holds an admin role in the current scope and then looks at
+the submission, wherever in Horizon it came from. That has a consequence worth
+being explicit about, because the two halves behave differently.
+
+Deletes are dashboard-independent already. The generic rule keys off the table
+name in the ``action`` field, and a table keeps its name across dashboards, so
+deleting a router from the project side is recorded exactly as deleting one
+from the admin side. Every table name Astrolabe maps refers to the same
+resource wherever Horizon uses it; the handful of other places the names turn
+up are ``LinkAction`` classes, which are ordinary links and never POST a
+delete.
+
+Creates are matched by URL, one rule at a time, so each rule has to say which
+dashboards it covers. Most of them need only one: flavors, volume types and
+host aggregates exist solely in the admin dashboard, and projects, domains,
+groups, roles and users solely in identity. Routers are the exception and the
+rule covers both, because the admin form subclasses the project one and adds
+nothing but the project selector.
+
+Networks are the case where that shortcut does not hold. The admin panel is a
+plain form; the project panel is a multi-step workflow that creates a subnet
+alongside the network, under different field names, and it would be a separate
+rule producing more than one command. It is not covered, so an admin creating
+a network from the project dashboard gets nothing — see Known limits.
 
 Endpoints and the token
 -----------------------
@@ -487,6 +517,9 @@ Known limits
   primary role in a second API call, which one command cannot express, so the
   recorded ``openstack user create`` leaves the new user unroled. Add the
   matching ``openstack role add`` yourself.
+* **Network create is recorded from the admin panel only.** The project
+  panel is a different form — a workflow that also creates a subnet — and
+  needs a rule of its own. See "Which dashboard a panel lives in".
 * **Create router does not record Enable SNAT.** Horizon sends it only when
   a gateway network was chosen too, nested beside the network id, and a rule
   cannot make one field depend on another. Unticking it is invisible here, so

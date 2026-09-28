@@ -222,9 +222,12 @@ FORMS = [
     {
         "id": "router-create",
         "title": "Create router",
-        "url": r"/admin/routers/create/?$",
-        # The admin form subclasses the project one and adds tenant_id, so
-        # every field below except that one comes from project.routers.
+        # Both dashboards, because the admin form subclasses the project one
+        # and adds nothing but tenant_id. A submission from the project side
+        # simply does not carry that field, and an absent value is already
+        # skipped. Validating against the admin class therefore covers both:
+        # its base_fields are a superset.
+        "url": r"/(admin|project)/routers/create/?$",
         "form": "openstack_dashboard.dashboards.admin.routers.forms"
                 ":CreateForm",
         "method": "POST",

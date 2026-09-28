@@ -418,6 +418,25 @@ class TestTranslate(unittest.TestCase):
         self.assertNotIn("external_gateway_info",
                          out["calls"][0]["body"]["router"])
 
+    def test_routers_are_recorded_from_either_dashboard(self):
+        # Astrolabe gates on the operator being an admin, not on the URL
+        # starting with /admin/, so an admin creating a router from the
+        # project dashboard has to land on the same rule.
+        for url in ("/admin/routers/create/", "/project/routers/create/"):
+            with self.subTest(url):
+                out = translate.translate(url, {"name": "r1"})
+                self.assertTrue(out["cli"].startswith(
+                    "openstack router create"))
+
+    def test_a_project_side_router_carries_no_project_flag(self):
+        # Only the admin form offers tenant_id. Its absence must read as
+        # "not supplied" rather than as an empty --project.
+        out = translate.translate("/project/routers/create/", {
+            "name": "mine", "admin_state_up": "on",
+        })
+        self.assertEqual(out["cli"], "openstack router create mine")
+        self.assertNotIn("tenant_id", out["calls"][0]["body"]["router"])
+
     def test_router_deletes_come_from_the_routers_table(self):
         out = translate.translate("/admin/routers/", {
             "action": "routers__delete",
