@@ -1,7 +1,8 @@
 # What this does not cover: layer 4 of the suite, which checks every rule
 # against the Horizon form class it targets. That needs a Horizon checkout and
-# would pin one Horizon version, so it stays a local step -- see "Tests" in the
-# README. A green run here does not promise the rules still match upstream.
+# would pin one Horizon version to every pull request, so it lives in
+# upstream.yml and runs weekly against Horizon master instead. A green run
+# here does not promise the rules still match upstream.
 
 name: ci
 

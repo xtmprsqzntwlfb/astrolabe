@@ -1,0 +1,114 @@
+# Layer 4 of the suite, run weekly against Horizon master.
+#
+# ci.yml answers "is Astrolabe self-consistent". This answers a different
+# question -- "do the rules still describe the Horizon that exists today" --
+# and it is the only check that can catch a rename upstream before an operator
+# hits it. validate() also runs at request time inside the plugin, but by then
+# someone has already upgraded and lost a recording.
+#
+# It is deliberately a separate workflow. A failure here usually means Horizon
+# changed, not that this repository did, so it must not turn a pull request
+# red. Read a failure as "go and look at upstream", not "the last commit broke
+# something".
+#
+# Known blind spot: validate() checks form classes and field names, not URLs
+# or table names. If Horizon moves a panel's path, the rule quietly stops
+# matching and nothing here notices.
+#
+# GitHub disables scheduled workflows in a repository with no activity for 60
+# days. If this stops reporting, that is the first thing to check.
+
+name: upstream
+
+on:
+  schedule:
+    # Mondays, early UTC. Horizon master does not move fast enough to warrant
+    # more, and a weekly cadence still lands well inside a release cycle.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rules-vs-horizon-master:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: astrolabe
+
+      # master on purpose: the point is early warning. A stable branch would
+      # only tell us what operators are already running.
+      - uses: actions/checkout@v4
+        with:
+          repository: openstack/horizon
+          ref: master
+          path: horizon
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Record which Horizon this ran against
+        working-directory: horizon
+        run: git log -1 --format='%H %ci %s'
+
+      # Horizon pins its dependencies through OpenStack's upper-constraints
+      # rather than in requirements.txt, and installing without them resolves
+      # versions no Horizon job has ever tested. Using them keeps a failure
+      # here meaning "the rules drifted" rather than "pip picked something new
+      # this morning".
+      - name: Install Horizon and its dependencies
+        working-directory: horizon
+        run: |
+          pip install -c https://releases.openstack.org/constraints/upper/master \
+            -r requirements.txt -r test-requirements.txt
+          pip install -e .
+
+      - name: Install Astrolabe
+        run: pip install -e astrolabe
+
+      # Layer 4 skips itself with a note when Horizon is not importable, so a
+      # broken install above would leave this job green having checked nothing
+      # -- the exact failure mode the job exists to prevent.
+      - name: Check Horizon imports, so layer 4 cannot skip
+        working-directory: horizon
+        env:
+          DJANGO_SETTINGS_MODULE: openstack_dashboard.test.settings
+          PYTHONPATH: .
+        run: |
+          python -c "
+          import django
+          django.setup()
+          import openstack_dashboard
+          print('horizon importable, django', django.get_version())
+          "
+
+      # Printed before the suite runs, because a traceback tells you a rule
+      # broke and this tells you which field on which form.
+      - name: Report what the rules make of this Horizon
+        working-directory: horizon
+        env:
+          DJANGO_SETTINGS_MODULE: openstack_dashboard.test.settings
+          PYTHONPATH: .
+        run: |
+          python -c "
+          import django
+          django.setup()
+          from astrolabe import rules
+          problems = rules.validate()
+          for line in problems:
+              print('DRIFT: %s' % line)
+          for rule, fields in sorted(rules.uncovered().items()):
+              print('unmapped: %s -> %s' % (rule, ', '.join(fields)))
+          print('%d rule(s) checked, %d problem(s)' % (len(rules.FORMS),
+                                                       len(problems)))
+          "
+
+      - name: Full suite, layer 4 included
+        working-directory: horizon
+        env:
+          DJANGO_SETTINGS_MODULE: openstack_dashboard.test.settings
+          PYTHONPATH: .
+        run: python ../astrolabe/tests/test_rules.py

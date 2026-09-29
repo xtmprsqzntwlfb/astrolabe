@@ -499,9 +499,24 @@ CI (``.github/workflows/ci.yml``) runs flake8, then the suite twice on each of
 Python 3.9 through 3.13 — once on a bare interpreter, which is what keeps the
 "needs nothing" claim above honest, and again with Django installed to pick up
 layer 3. It also builds a wheel and checks the template and the enabled file
-are inside it. **Layer 4 is not in CI**: it needs a Horizon checkout and would
-pin one Horizon version, so a green run says nothing about whether the rules
-still match upstream. Run it locally after a Horizon upgrade.
+are inside it. **Layer 4 is not part of that run**: it needs a Horizon
+checkout, and pinning one Horizon version to every pull request would say
+nothing useful about upstream.
+
+Layer 4 has a workflow of its own instead. ``upstream.yml`` runs weekly
+against Horizon **master**, installing Horizon under OpenStack's
+upper-constraints and printing ``validate()`` and ``uncovered()`` before
+running the suite. It answers a different question from ``ci.yml`` — not "is
+Astrolabe self-consistent" but "do the rules still describe the Horizon that
+exists today" — so it is scheduled rather than attached to pull requests, and
+a failure there means go and look at upstream rather than at the last commit.
+It is early warning: ``validate()`` runs inside the plugin too, but by then
+somebody has upgraded and lost a recording.
+
+It shares ``validate()``'s blind spot. Form classes and field names are
+checked; URLs and table names are not. If Horizon moves a panel's path, the
+rule simply stops matching, and neither the weekly run nor the plugin will
+say so.
 
 Known limits
 ============
