@@ -226,7 +226,9 @@ FORMS = [
         # and adds nothing but tenant_id. A submission from the project side
         # simply does not carry that field, and an absent value is already
         # skipped. Validating against the admin class therefore covers both:
-        # its base_fields are a superset.
+        # its base_fields are a superset. The cost is that a project-side
+        # command names no project, because none was submitted — Horizon uses
+        # whatever scope the operator is in. See Known limits.
         "url": r"/(admin|project)/routers/create/?$",
         "form": "openstack_dashboard.dashboards.admin.routers.forms"
                 ":CreateForm",

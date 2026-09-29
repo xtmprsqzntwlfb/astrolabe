@@ -114,8 +114,10 @@ carry the operator's actual input rather than a proxy's reshaping of it.
 What v1 covers
 ==============
 
-Panels chosen because they are unambiguously admin-scoped (no policy or
-project-scoping subtleties) and have flat, well-understood forms:
+Panels chosen for flat, well-understood forms over admin-managed resources.
+Most of them exist only in the admin or identity dashboards; routers are the
+one that does not, and *Which dashboard a panel lives in* below says how that
+is handled:
 
 ============================== ====================================
 Action                         Rendered as
@@ -459,8 +461,13 @@ If the declarative vocabulary cannot express a new panel, extend both
 ``rules.py`` and ``translate.py``'s ``_apply_form`` together, and add a case to
 ``tests/test_rules.py``.
 
-Keep new rules admin-scoped for now. Project-scoped panels bring policy and
-project-id questions that v1 deliberately avoids.
+A rule covers whatever dashboards its form serves, which is usually one. Give
+a rule a second dashboard only when the same form class is behind both, as it
+is for routers; a panel that merely creates the same kind of resource is a
+different form and wants a rule of its own. Where a project-side form leaves
+the owning project implicit, say so in Known limits rather than guessing at a
+``--project`` value: Astrolabe records what was submitted, and the project was
+not.
 
 Tests
 =====
@@ -520,6 +527,13 @@ Known limits
 * **Network create is recorded from the admin panel only.** The project
   panel is a different form — a workflow that also creates a subnet — and
   needs a rule of its own. See "Which dashboard a panel lives in".
+* **A router created from the project dashboard records no owning project.**
+  Only the admin form offers a project selector. From the project side Horizon
+  uses whatever scope you are in, and there is no field to record, so the
+  command comes out as a bare ``openstack router create <name>`` and creates
+  the router in whichever project your shell is scoped to at the time. Every
+  other recorded command names what it acts on; this one does not. Add
+  ``--project`` yourself if you will run it elsewhere.
 * **Create router does not record Enable SNAT.** Horizon sends it only when
   a gateway network was chosen too, nested beside the network id, and a rule
   cannot make one field depend on another. Unticking it is invisible here, so
