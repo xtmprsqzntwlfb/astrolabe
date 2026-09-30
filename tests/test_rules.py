@@ -99,6 +99,20 @@ class TestRuleSet(unittest.TestCase):
             with self.subTest(form["id"]):
                 re.compile(form["url"])
 
+    def test_every_rule_names_the_panels_it_serves(self):
+        # Without a route a rule's url pattern is unfalsifiable: nothing can
+        # tell whether it still points at a page that exists.
+        for form in rules.FORMS:
+            with self.subTest(form["id"]):
+                self.assertTrue(form["routes"])
+                for name in form["routes"]:
+                    self.assertTrue(name.startswith("horizon:"), name)
+
+    def test_every_table_names_the_class_it_came_from(self):
+        for key, table in rules.TABLES.items():
+            with self.subTest(key):
+                self.assertIn(":", table["table"])
+
     def test_field_kinds_are_known(self):
         for form in rules.FORMS:
             for field in form["fields"]:
@@ -852,6 +866,59 @@ class TestAgainstHorizon(unittest.TestCase):
         self.assertIn("memory_gb", problems[0])
         # And the real rule set is still clean afterwards.
         self.assertEqual(rules.validate(), [])
+
+    def test_validate_detects_a_moved_panel(self):
+        # The failure this whole mechanism exists for: the form is untouched,
+        # every field is where the rule says, and the panel has moved, so the
+        # rule never fires again. Checking fields alone would call this fine.
+        form = dict(rules.FORMS[0])
+        form["url"] = r"/admin/flavors/somewhere_else/?$"
+        original = rules.FORMS
+        rules.FORMS = [form]
+        try:
+            problems = rules.validate()
+        finally:
+            rules.FORMS = original
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("does not match", problems[0])
+        self.assertEqual(rules.validate(), [])
+
+    def test_validate_detects_a_route_that_stopped_reversing(self):
+        form = dict(rules.FORMS[0])
+        form["routes"] = ["horizon:admin:flavors:no_such_view"]
+        original = rules.FORMS
+        rules.FORMS = [form]
+        try:
+            problems = rules.validate()
+        finally:
+            rules.FORMS = original
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("cannot fire", problems[0])
+        self.assertEqual(rules.validate(), [])
+
+    def test_validate_detects_a_renamed_table(self):
+        # A renamed table is the delete-side version of a moved panel: the
+        # action field stops carrying the name we match on, and deletes go
+        # unrecorded with nothing said.
+        original = dict(rules.TABLES["roles"])
+        rules.TABLES["roles"] = dict(
+            original, table=rules.IDENT + "users.tables:UsersTable")
+        try:
+            problems = rules.validate()
+        finally:
+            rules.TABLES["roles"] = original
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("stop being recorded", problems[0])
+        self.assertEqual(rules.validate(), [])
+
+    def test_every_route_reverses_to_something_its_rule_matches(self):
+        # validate() covers this, but a failure there names one rule among
+        # many. This reports each panel separately.
+        from django.urls import reverse
+        for form in rules.FORMS:
+            for name in form["routes"]:
+                with self.subTest(form["id"], route=name):
+                    self.assertRegex(reverse(name), form["url"])
 
     def test_uncovered_fields_are_reported_for_review(self):
         # Not a failure: plenty of fields are deliberately unmapped. Printed

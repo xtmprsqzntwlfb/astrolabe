@@ -11,9 +11,10 @@
 # red. Read a failure as "go and look at upstream", not "the last commit broke
 # something".
 #
-# Known blind spot: validate() checks form classes and field names, not URLs
-# or table names. If Horizon moves a panel's path, the rule quietly stops
-# matching and nothing here notices.
+# validate() covers all three ways a rule can go stale: a renamed field, a
+# moved panel URL, and a renamed table. The middle one is the reason this job
+# is worth its runtime -- a moved panel leaves every field exactly where the
+# rule says and simply never matches again.
 #
 # GitHub disables scheduled workflows in a repository with no activity for 60
 # days. If this stops reporting, that is the first thing to check.

@@ -55,11 +55,15 @@ handful of forms it explicitly understands::
                        rules.py
 
 The rules live in Python, in ``astrolabe/rules.py``, which is pure data plus
-its own self-check. ``rules.validate()`` imports the Horizon form each rule
-targets and confirms the field names still exist, so a rename in a future
-Horizon release surfaces as a logged warning rather than a silently incomplete
-command. The check runs once, on the first submission a rule matches, and its
-failures are logged rather than raised.
+its own self-check. ``rules.validate()`` confirms all three things a rule
+depends on, because they drift independently: the form class and its field
+names, the URL the rule matches on (reversed from the Horizon URL name the
+rule records, since the name is the stable handle and the path is what moves),
+and the table name deletes arrive under. A rule can be perfectly correct about
+its fields and still never fire. All three surface as a logged warning rather
+than a silently incomplete — or silently absent — command. The check runs
+once, on the first submission a rule matches, and its failures are logged
+rather than raised.
 
 ``astrolabe/translate.py`` holds the interpreter that applies the rules. It
 knows nothing about any particular panel.
@@ -447,6 +451,15 @@ everything so far:
     the form requires. Nothing reaches the REST body. The field name is still
     recorded, so ``validate()`` keeps checking it exists.
 
+Alongside the fields, a rule records where it lives. ``routes`` lists the
+Horizon URL names the rule serves — usually one, two for routers — and
+``validate()`` reverses each and checks the rule's pattern still matches the
+path that comes back. Patterns end in ``/?$`` because several of these paths
+have no trailing slash (``/identity/create``,
+``/admin/volume_types/create_type``); the test is what keeps that from being
+tidied away. A ``TABLES`` entry names the ``DataTable`` class its key came
+from, so the same check covers deletes.
+
 Set ``form`` to the Horizon class the rule targets, as
 ``"module:ClassName"``. That is what lets ``validate()`` check the rule against
 the real form. You do not need to look the field names up by hand::
@@ -513,10 +526,9 @@ a failure there means go and look at upstream rather than at the last commit.
 It is early warning: ``validate()`` runs inside the plugin too, but by then
 somebody has upgraded and lost a recording.
 
-It shares ``validate()``'s blind spot. Form classes and field names are
-checked; URLs and table names are not. If Horizon moves a panel's path, the
-rule simply stops matching, and neither the weekly run nor the plugin will
-say so.
+Layer 4 stages each drift it claims to catch and asserts it is reported — a
+renamed field, a moved panel, a URL name that stopped reversing, a renamed
+table — so none of the four can pass vacuously.
 
 Known limits
 ============

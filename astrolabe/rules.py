@@ -27,6 +27,8 @@ Nothing at module level imports Django or Horizon, so this module stays
 importable (and testable) on its own.
 """
 
+import re
+
 from importlib import import_module
 
 # Rendered commands never carry a real endpoint or a real token: these panels
@@ -36,6 +38,10 @@ COMPUTE = "$OS_COMPUTE_API"
 VOLUME = "$OS_VOLUME_API"
 NETWORK = "$OS_NETWORK_API"
 IDENTITY = "$OS_IDENTITY_API"
+
+# Import prefixes, only to keep the table list below readable.
+ADMIN = "openstack_dashboard.dashboards.admin."
+IDENT = "openstack_dashboard.dashboards.identity."
 
 
 # --------------------------------------------------------------- field kinds
@@ -137,6 +143,7 @@ FORMS = [
         "url": r"/admin/flavors/create/?$",
         "form": "openstack_dashboard.dashboards.admin.flavors.workflows"
                 ":CreateFlavorInfoAction",
+        "routes": ["horizon:admin:flavors:create"],
         "method": "POST",
         "endpoint": COMPUTE + "/flavors",
         "envelope": "flavor",
@@ -160,6 +167,7 @@ FORMS = [
         "url": r"/admin/volume_types/create_type/?$",
         "form": "openstack_dashboard.dashboards.admin.volume_types.forms"
                 ":CreateVolumeType",
+        "routes": ["horizon:admin:volume_types:create_type"],
         "method": "POST",
         "endpoint": VOLUME + "/types",
         "envelope": "volume_type",
@@ -178,6 +186,7 @@ FORMS = [
         "url": r"/admin/networks/create/?$",
         "form": "openstack_dashboard.dashboards.admin.networks.forms"
                 ":CreateNetwork",
+        "routes": ["horizon:admin:networks:create"],
         "method": "POST",
         "endpoint": NETWORK + "/networks",
         "envelope": "network",
@@ -206,6 +215,7 @@ FORMS = [
         "url": r"/admin/aggregates/create/?$",
         "form": "openstack_dashboard.dashboards.admin.aggregates.workflows"
                 ":SetAggregateInfoAction",
+        "routes": ["horizon:admin:aggregates:create"],
         "method": "POST",
         "endpoint": COMPUTE + "/os-aggregates",
         "envelope": "aggregate",
@@ -232,6 +242,10 @@ FORMS = [
         "url": r"/(admin|project)/routers/create/?$",
         "form": "openstack_dashboard.dashboards.admin.routers.forms"
                 ":CreateForm",
+        "routes": [
+            "horizon:admin:routers:create",
+            "horizon:project:routers:create",
+        ],
         "method": "POST",
         "endpoint": NETWORK + "/routers",
         "envelope": "router",
@@ -269,6 +283,7 @@ FORMS = [
         "url": r"/identity/create/?$",
         "form": "openstack_dashboard.dashboards.identity.projects.workflows"
                 ":CreateProjectInfoAction",
+        "routes": ["horizon:identity:projects:create"],
         "method": "POST",
         "endpoint": IDENTITY + "/projects",
         "envelope": "project",
@@ -289,6 +304,7 @@ FORMS = [
         "url": r"/identity/domains/create/?$",
         "form": "openstack_dashboard.dashboards.identity.domains.workflows"
                 ":CreateDomainInfoAction",
+        "routes": ["horizon:identity:domains:create"],
         "method": "POST",
         "endpoint": IDENTITY + "/domains",
         "envelope": "domain",
@@ -305,6 +321,7 @@ FORMS = [
         "url": r"/identity/groups/create/?$",
         "form": "openstack_dashboard.dashboards.identity.groups.forms"
                 ":CreateGroupForm",
+        "routes": ["horizon:identity:groups:create"],
         "method": "POST",
         "endpoint": IDENTITY + "/groups",
         "envelope": "group",
@@ -320,6 +337,7 @@ FORMS = [
         "url": r"/identity/users/create/?$",
         "form": "openstack_dashboard.dashboards.identity.users.forms"
                 ":CreateUserForm",
+        "routes": ["horizon:identity:users:create"],
         "method": "POST",
         "endpoint": IDENTITY + "/users",
         "envelope": "user",
@@ -353,6 +371,7 @@ FORMS = [
         "url": r"/identity/roles/create/?$",
         "form": "openstack_dashboard.dashboards.identity.roles.forms"
                 ":CreateRoleForm",
+        "routes": ["horizon:identity:roles:create"],
         "method": "POST",
         "endpoint": IDENTITY + "/roles",
         "envelope": "role",
@@ -366,20 +385,56 @@ FORMS = [
 # Horizon encodes table actions as "<table>__<action>[__<id>]" in a field named
 # "action". Only tables listed here are recognised; deletes on anything else
 # are ignored. Row actions and multi-select batch deletes both work.
+#
+# The key is the name Horizon gives the table, which is what arrives in the
+# action field. "table" names the DataTable class it came from, so validate()
+# can confirm the name is still that class's, the way "form" lets it confirm a
+# rule's fields. Deletes are dashboard-independent -- a table keeps its name
+# wherever it is used -- so one class is enough even where two dashboards
+# render the same table.
 TABLES = {
-    "flavors": {"noun": "flavor", "path": COMPUTE + "/flavors"},
-    "volume_types": {"noun": "volume type", "path": VOLUME + "/types"},
-    "networks": {"noun": "network", "path": NETWORK + "/networks"},
-    "routers": {"noun": "router", "path": NETWORK + "/routers"},
-    "host_aggregates": {"noun": "aggregate",
-                        "path": COMPUTE + "/os-aggregates"},
+    "flavors": {
+        "noun": "flavor", "path": COMPUTE + "/flavors",
+        "table": ADMIN + "flavors.tables:FlavorsTable",
+    },
+    "volume_types": {
+        "noun": "volume type", "path": VOLUME + "/types",
+        "table": ADMIN + "volume_types.tables:VolumeTypesTable",
+    },
+    "networks": {
+        "noun": "network", "path": NETWORK + "/networks",
+        "table": ADMIN + "networks.tables:NetworksTable",
+    },
+    "routers": {
+        "noun": "router", "path": NETWORK + "/routers",
+        "table": ADMIN + "routers.tables:RoutersTable",
+    },
+    "host_aggregates": {
+        "noun": "aggregate", "path": COMPUTE + "/os-aggregates",
+        "table": ADMIN + "aggregates.tables:HostAggregatesTable",
+    },
     # Horizon still calls the project table "tenants", the pre-Keystone-v3
     # name. The CLI noun and the API path are both "project".
-    "tenants": {"noun": "project", "path": IDENTITY + "/projects"},
-    "domains": {"noun": "domain", "path": IDENTITY + "/domains"},
-    "groups": {"noun": "group", "path": IDENTITY + "/groups"},
-    "roles": {"noun": "role", "path": IDENTITY + "/roles"},
-    "users": {"noun": "user", "path": IDENTITY + "/users"},
+    "tenants": {
+        "noun": "project", "path": IDENTITY + "/projects",
+        "table": IDENT + "projects.tables:TenantsTable",
+    },
+    "domains": {
+        "noun": "domain", "path": IDENTITY + "/domains",
+        "table": IDENT + "domains.tables:DomainsTable",
+    },
+    "groups": {
+        "noun": "group", "path": IDENTITY + "/groups",
+        "table": IDENT + "groups.tables:GroupsTable",
+    },
+    "roles": {
+        "noun": "role", "path": IDENTITY + "/roles",
+        "table": IDENT + "roles.tables:RolesTable",
+    },
+    "users": {
+        "noun": "user", "path": IDENTITY + "/users",
+        "table": IDENT + "users.tables:UsersTable",
+    },
 }
 
 
@@ -391,14 +446,66 @@ def _load_form(target):
     return getattr(import_module(module_name), class_name)
 
 
+def _check_routes(form, problems):
+    """Confirm a rule's url pattern still reaches the panel it names.
+
+    Checking fields is not enough. If Horizon moves a panel's path, every
+    field on the form is still exactly where the rule says, and the rule
+    simply stops matching -- no warning, no failure, nothing recorded. This is
+    the half of the safety net that notices.
+
+    Reversing the URL name rather than hard-coding a path is the point: the
+    name is Horizon's stable handle, the path is the thing allowed to move.
+    """
+    from django.urls import NoReverseMatch
+    from django.urls import reverse
+
+    for name in form["routes"]:
+        try:
+            path = reverse(name)
+        except NoReverseMatch:
+            problems.append(
+                "%s: %s no longer reverses; the rule cannot fire"
+                % (form["id"], name))
+            continue
+        if not re.search(form["url"], path):
+            problems.append(
+                "%s: %s is now %s, which %r does not match"
+                % (form["id"], name, path, form["url"]))
+
+
+def _check_tables(problems):
+    """Confirm each delete rule's table still goes by the name we match on."""
+    for key, table in TABLES.items():
+        target = table["table"]
+        try:
+            table_class = _load_form(target)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            problems.append(
+                "table %s: cannot import %s (%s)" % (key, target, exc))
+            continue
+        actual = getattr(getattr(table_class, "_meta", None), "name", None)
+        if actual != key:
+            problems.append(
+                "table %s: %s now calls itself %r, so deletes there stop "
+                "being recorded" % (key, target, actual))
+
+
 def validate():
-    """Check every rule still matches the Horizon form it targets.
+    """Check every rule still describes the Horizon it targets.
+
+    Three things can drift independently, so all three are checked: the form
+    class and its field names, the URL the rule matches on, and the table name
+    deletes arrive under. A rule can be perfectly correct about its fields and
+    still never fire.
 
     Returns a list of human-readable problems, empty when all is well. Imports
     Horizon lazily, so this module remains usable without a dashboard present.
     """
     problems = []
+    _check_tables(problems)
     for form in FORMS:
+        _check_routes(form, problems)
         target = form.get("form")
         if not target:
             continue
