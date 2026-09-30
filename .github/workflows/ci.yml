@@ -73,7 +73,12 @@ jobs:
       # package_data and MANIFEST.in have drifted before. A plugin whose
       # template or enabled file is missing from the wheel installs cleanly
       # and then fails in the dashboard, which is the worst place to find out.
-      - name: Check the wheel carries the template and the enabled file
+      #
+      # The version is checked here too. setup.cfg reads it from
+      # astrolabe.__version__ with attr:, and the failure mode is quiet:
+      # setuptools falls back to 0.0.0 rather than complaining, leaving every
+      # install indistinguishable from every other one.
+      - name: Check the wheel carries the template, the enabled file and a version
         run: |
           python - <<'PY'
           import glob
@@ -81,7 +86,19 @@ jobs:
           import zipfile
 
           wheel = glob.glob('dist/*.whl')[0]
-          names = set(zipfile.ZipFile(wheel).namelist())
+          archive = zipfile.ZipFile(wheel)
+          names = set(archive.namelist())
+
+          metadata = [n for n in names if n.endswith('.dist-info/METADATA')][0]
+          version = ''
+          for line in archive.read(metadata).decode().splitlines():
+              if line.startswith('Version:'):
+                  version = line.split(':', 1)[1].strip()
+          if version in ('', '0.0.0'):
+              sys.exit('%s is version %r; setup.cfg has lost its version key '
+                       'or attr: no longer resolves' % (wheel, version))
+          print('%s is version %s' % (wheel, version))
+
           required = {
               'astrolabe/templates/astrolabe/index.html',
               'astrolabe/enabled/_9020_astrolabe.py',

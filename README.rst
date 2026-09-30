@@ -239,11 +239,14 @@ Run these from the parent directory that holds both trees.
 
    Then confirm it imported into the right place::
 
-     python -c "import astrolabe; print('ok', astrolabe.__file__)"
+     python -c "import astrolabe; print(astrolabe.__version__, astrolabe.__file__)"
 
-   You should see ``ok`` and a path ending in
+   You should see a version and a path ending in
    ``.../site-packages/astrolabe/__init__.py``. If it errors, the wrong
-   ``pip``/``python`` was used — fix that before going on.
+   ``pip``/``python`` was used — fix that before going on. The version is
+   written in ``astrolabe/__init__.py`` and ``setup.cfg`` reads it from there
+   with ``attr:``, so the package metadata and the running code cannot
+   disagree.
 
    (Use ``pip install -e .`` instead if you want edits in ``astrolabe`` to take
    effect on restart without reinstalling.)
