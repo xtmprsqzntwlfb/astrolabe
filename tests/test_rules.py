@@ -18,8 +18,10 @@ Four layers, in increasing order of what they need to be present:
 1. The rules are well formed and internally consistent. Needs nothing.
 2. The interpreter turns them into the expected commands, and the session
    store behaves. Needs nothing.
-3. The middleware records the right things, and only for the right people.
-   Needs Django, but not Horizon.
+3. The middleware records the right things and only for the right people,
+   and the panel shows back what it recorded. Needs Django, but not Horizon:
+   the one class the views borrow from Horizon is stood in for when there is
+   no Horizon to borrow it from.
 4. The rules still match the Horizon forms they target. Needs a Horizon
    checkout; skipped with a note when one is not importable.
 
@@ -35,6 +37,7 @@ import json
 import os
 import re
 import sys
+import types
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
@@ -822,6 +825,250 @@ class _MessageStorage(object):
 class _BrokenSession(Session):
     def __setitem__(self, key, value):
         raise RuntimeError("session backend is down")
+
+
+# ------------------------------------------------------- 3b. the panel views
+#
+# The panel is the other half of the middleware: one writes an entry shape
+# into the session, the other reads it back out and renders it. Tested apart,
+# both can be right while disagreeing about what an entry looks like, so
+# these tests put a real translate() result through the real template.
+#
+# Two things stand between that and a bare Django. The views inherit from
+# Horizon's HorizonTemplateView, and the template extends Horizon's
+# base.html; both are replaced below with the smallest stand-in that still
+# exercises our own code.
+
+
+def _use_stub_horizon():
+    """Make ``astrolabe.views`` importable without a Horizon on the path.
+
+    Only when there is genuinely no Horizon: with a real one installed the
+    real base class is used, so this substitution can never be what hides a
+    change in what the panel inherits.
+    """
+    try:
+        import horizon.views  # noqa: F401
+        return False
+    except ImportError:
+        pass
+
+    from django.views import generic
+    stub = types.ModuleType("horizon")
+    stub_views = types.ModuleType("horizon.views")
+    # HorizonTemplateView is a TemplateView plus a page-title mixin, and the
+    # title is rendered by base.html, which is stubbed too.
+    stub_views.HorizonTemplateView = generic.TemplateView
+    stub.views = stub_views
+    sys.modules.setdefault("horizon", stub)
+    sys.modules.setdefault("horizon.views", stub_views)
+    return True
+
+
+def _panel_templates():
+    """A template setup that can find our template and nothing else.
+
+    ``base.html`` is Horizon's, and rendering the real one means standing up
+    a dashboard, a navigation tree and a request context this plugin has no
+    part in. What is ours is what goes inside ``{% block main %}``, so that
+    is the only block the stand-in keeps.
+    """
+    from astrolabe import rules as _rules
+    templates = os.path.join(os.path.dirname(_rules.__file__), "templates")
+    return [{
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [templates],
+        "OPTIONS": {
+            "loaders": [
+                ("django.template.loaders.locmem.Loader",
+                 {"base.html": "{% block main %}{% endblock %}"}),
+                "django.template.loaders.filesystem.Loader",
+            ],
+        },
+    }]
+
+
+def _panel_urlconf():
+    """The URL names Horizon would build, without building a Horizon.
+
+    Horizon composes ``horizon:<dashboard slug>:<panel slug>:<name>`` from
+    ``Astrolabe.slug`` and ``Commands.slug``. Both of those modules import
+    horizon, so this mirrors the result instead. The namespace is worth
+    getting right: views.clear and the template hard-code it, and a rename on
+    either side is a 500 on a page that otherwise looks fine.
+    """
+    name = "astrolabe_panel_urls_for_tests"
+    if name not in sys.modules:
+        from django.urls import include
+        from django.urls import re_path
+        panel = include(("astrolabe.panel_urls", "commands"))
+        dashboard = include(([re_path(r"^commands/", panel)], "astrolabe"))
+        site = include(([re_path(r"^astrolabe/", dashboard)], "horizon"))
+        module = types.ModuleType(name)
+        module.urlpatterns = [re_path(r"^", site)]
+        sys.modules[name] = module
+    return name
+
+
+class TestPanelViews(unittest.TestCase):
+    """What the middleware recorded is what the panel shows."""
+
+    def setUp(self):
+        try:
+            import django
+            from django.conf import settings
+        except ImportError:
+            self.skipTest("Django is not on this interpreter's path")
+        if not settings.configured:
+            settings.configure(DEBUG=True)
+        # Needed before anything renders: the i18n tags in the template walk
+        # the app registry looking for locale directories.
+        django.setup()
+        _use_stub_horizon()
+
+        from django.test import override_settings
+        # Overridden rather than configured, so these tests behave the same
+        # whether the baseline settings are the bare ones above or Horizon's,
+        # which is what layer 4 runs under.
+        overrides = override_settings(TEMPLATES=_panel_templates(),
+                                      ROOT_URLCONF=_panel_urlconf())
+        overrides.enable()
+        self.addCleanup(overrides.disable)
+
+        from astrolabe import views
+        self.views = views
+
+    def _request(self, method="get", path="/astrolabe/commands/"):
+        from django.test import RequestFactory
+        request = getattr(RequestFactory(), method)(path)
+        request.session = Session()
+        return request
+
+    def _recorded(self, name="m1.small", ok=True):
+        """An entry exactly as the middleware would have written it."""
+        entry = translate.translate("/admin/flavors/create/", {
+            "name": name, "vcpus": "1", "memory_mb": "2048", "disk_gb": "20",
+        })
+        entry["at"] = 1757000000.0
+        entry["ok"] = ok
+        return entry
+
+    def _page(self, entries=(), session=None):
+        """Render the panel over a session holding ``entries``, oldest first."""
+        request = self._request()
+        if session is not None:
+            request.session = session
+        for entry in entries:
+            store.add(request.session, entry)
+        response = self.views.IndexView.as_view()(request)
+        return response.render().content.decode("utf-8")
+
+    def test_the_panel_renders_what_the_middleware_recorded(self):
+        page = self._page([self._recorded()])
+        self.assertIn("openstack flavor create", page)
+        self.assertIn("m1.small", page)
+        # And the REST half, which only exists on the page: the session
+        # stores calls in structured form and the view renders them.
+        self.assertIn("$OS_COMPUTE_API/flavors", page)
+        self.assertIn("X-Auth-Token: $OS_TOKEN", page)
+
+    def test_the_panel_lists_the_newest_action_first(self):
+        page = self._page([self._recorded("m1.older"),
+                           self._recorded("m1.newer")])
+        self.assertLess(page.index("m1.newer"), page.index("m1.older"),
+                        "the panel shows newest first; only the script "
+                        "download runs in the order the operator worked")
+
+    def test_a_rejected_action_is_marked_as_rejected(self):
+        self.assertIn("rejected by the dashboard",
+                      self._page([self._recorded(ok=False)]))
+        self.assertNotIn("rejected by the dashboard",
+                         self._page([self._recorded(ok=True)]))
+
+    def test_an_entry_written_by_an_older_astrolabe_still_renders(self):
+        # Sessions survive a restart on the cache backend, so an upgrade can
+        # find entries in the session that predate whatever keys the current
+        # code expects. None of them may raise, and a missing ``ok`` in
+        # particular must not read as "the dashboard refused this".
+        page = self._page([{"title": "Create flavor m1.old",
+                            "cli": "openstack flavor create m1.old"}])
+        self.assertIn("openstack flavor create m1.old", page)
+        self.assertNotIn("rejected by the dashboard", page)
+
+    def test_an_empty_log_says_so_and_offers_nothing_to_clear(self):
+        page = self._page()
+        self.assertIn("Nothing recorded yet", page)
+        self.assertNotIn("commands/clear", page)
+        # The download stays, because an empty script is still valid output.
+        self.assertIn("commands/script", page)
+
+    def test_a_command_is_escaped_before_it_reaches_the_page(self):
+        # Every rendered command is built from text the operator typed into a
+        # Horizon form, and the panel hands it straight back to them.
+        entry = self._recorded(name="<img src=x onerror=alert(1)>")
+        page = self._page([entry])
+        self.assertNotIn("<img", page)
+        self.assertIn("&lt;img", page)
+
+    def test_the_footer_explains_every_placeholder_a_command_can_hold(self):
+        # A new rule with a new endpoint is the easy way to leave an operator
+        # looking at a placeholder the page never mentions.
+        used = {"$OS_TOKEN"}
+        for rule in rules.FORMS:
+            used.update(re.findall(r"\$OS_[A-Z_]+", rule["endpoint"]))
+        for table in rules.TABLES.values():
+            used.update(re.findall(r"\$OS_[A-Z_]+", table["path"]))
+        page = self._page([self._recorded()])
+        listed = {name for name, _example in self.views.ENVIRONMENT}
+        self.assertEqual(sorted(used - listed), [],
+                         "these appear in rendered commands but are not in "
+                         "views.ENVIRONMENT")
+        for name in sorted(used):
+            self.assertIn(name, page)
+
+    def test_the_panel_states_the_cap_it_is_keeping(self):
+        from django.test import override_settings
+        with override_settings(ASTROLABE_MAX_ENTRIES=3):
+            page = self._page([self._recorded()])
+        self.assertIn("most recent 3 actions", page)
+
+    def test_the_download_is_a_shell_script_named_for_the_moment(self):
+        request = self._request()
+        store.add(request.session, self._recorded())
+        response = self.views.script(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/x-shellscript", response["Content-Type"])
+        self.assertRegex(response["Content-Disposition"],
+                         r'^attachment; filename="astrolabe-'
+                         r'\d{8}-\d{6}\.sh"$')
+        body = response.content.decode("utf-8")
+        self.assertTrue(body.startswith("#!/bin/sh"))
+        # Unescaped, unlike the page: this one is meant to be run.
+        self.assertIn("openstack flavor create", body)
+
+    def test_the_download_of_an_empty_log_is_still_a_script(self):
+        body = self.views.script(self._request()).content.decode("utf-8")
+        self.assertTrue(body.startswith("#!/bin/sh"))
+
+    def test_clear_empties_the_log_and_returns_to_the_panel(self):
+        request = self._request("post", "/astrolabe/commands/clear/")
+        store.add(request.session, self._recorded())
+        response = self.views.clear(request)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/astrolabe/commands/")
+        self.assertEqual(store.load(request.session), [])
+
+    def test_clear_refuses_a_get(self):
+        # It is a link away from being wiped by a browser prefetch or
+        # anything else that follows a URL without being asked to.
+        request = self._request("get", "/astrolabe/commands/clear/")
+        store.add(request.session, self._recorded())
+        # Asserted as well as caught: Django logs the refusal, and letting it
+        # through would print a warning in the middle of a passing run.
+        with self.assertLogs("django.request", level="WARNING"):
+            response = self.views.clear(request)
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(len(store.load(request.session)), 1)
 
 
 # ---------------------------------------------------------- 4. against Horizon

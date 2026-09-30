@@ -51,6 +51,11 @@ def _decorate(entry):
     shown["when"] = datetime.datetime.fromtimestamp(entry.get("at") or 0)
     shown["curls"] = [translate.curl_for(call)
                       for call in entry.get("calls") or []]
+    # Defaulted rather than read straight, because the template marks a
+    # falsey ``ok`` as rejected. Sessions outlive a restart on the cache
+    # backend, so an entry written by an older Astrolabe can still be sitting
+    # there after an upgrade, and a missing key must not read as a failure.
+    shown["ok"] = entry.get("ok", True)
     return shown
 
 

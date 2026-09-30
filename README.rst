@@ -494,10 +494,19 @@ Four layers, in increasing order of what has to be present:
 1. The rules are well formed and internally consistent. Needs nothing.
 2. The interpreter turns them into the expected commands, and the session store
    behaves. Needs nothing.
-3. The middleware records the right things, and only for the right people.
-   Needs Django, but not Horizon.
+3. The middleware records the right things and only for the right people, and
+   the panel shows back what it recorded. Needs Django, but not Horizon.
 4. The rules still match the Horizon forms they target. Needs a Horizon
    checkout, and is skipped with a note when one is not importable.
+
+The panel half of layer 3 renders the real template over a real
+``translate()`` result, because the middleware and the panel are the two ends
+of one entry shape and testing them apart lets both be right while
+disagreeing. Two things belong to Horizon rather than to Astrolabe — the view
+base class and ``base.html`` — and both are stood in for when no Horizon is
+importable, so the panel is covered on every CI interpreter rather than only
+in the weekly job. When a real Horizon *is* on the path, the real base class
+is used, so the substitution cannot be what hides a change in it.
 
 To include layer 4, run it with the interpreter that has Horizon on its path::
 
