@@ -46,8 +46,9 @@ IDENT = "openstack_dashboard.dashboards.identity."
 
 # --------------------------------------------------------------- field kinds
 #
-# Six kinds cover every rule below. Each describes one form field: how it
-# reaches the command line, and how it reaches the REST body.
+# Seven kinds cover every rule below. Each describes one form field: how it
+# reaches the command line, and how it reaches the REST body. The last of them
+# is the exception, and reads the URL rather than the submission.
 
 
 def opt(field, flag, api=None, cast="str", omit_when=None, absent_when=None):
@@ -205,6 +206,31 @@ FORMS = [
         ],
     },
     {
+        "id": "volume-type-update",
+        "title": "Update volume type",
+        "url": r"/admin/volume_types/(?P<id>[^/]+)/update_type/?$",
+        "form": "openstack_dashboard.dashboards.admin.volume_types.forms"
+                ":EditVolumeType",
+        "routes": ["horizon:admin:volume_types:update_type"],
+        "method": "PUT",
+        "endpoint": VOLUME + "/types/{id}",
+        "envelope": "volume_type",
+        "command": ["openstack", "volume", "type", "set"],
+        "fields": [
+            opt("name", "--name"),
+            # The create form calls this vol_type_description; the edit form
+            # calls it description. Same field to an operator, two names to a
+            # rule.
+            opt("description", "--description"),
+            # Cinder spells the key two ways, and both are right: a create
+            # takes "os-volume-type-access:is_public", an update takes a plain
+            # "is_public". volume_type_update passes it on every edit, so both
+            # sides of the box are named here.
+            boolean("is_public", "is_public", on="--public", off="--private"),
+            target(),
+        ],
+    },
+    {
         "id": "network-create",
         "title": "Create network",
         "url": r"/admin/networks/create/?$",
@@ -287,6 +313,27 @@ FORMS = [
         ],
     },
     {
+        "id": "aggregate-update",
+        "title": "Update host aggregate",
+        "url": r"/admin/aggregates/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.admin.aggregates.forms"
+                ":UpdateAggregateForm",
+        "routes": ["horizon:admin:aggregates:update"],
+        "method": "PUT",
+        "endpoint": COMPUTE + "/os-aggregates/{id}",
+        "envelope": "aggregate",
+        "command": ["openstack", "aggregate", "set"],
+        # Nothing is missing here, unlike the create rule: hosts are added and
+        # removed by a panel of their own, which this form does not touch.
+        "fields": [
+            opt("name", "--name"),
+            # Nova will not let a zone be cleared once it is set, so Horizon
+            # only ever sends a value, and a blank one is already skipped.
+            opt("availability_zone", "--zone"),
+            target(),
+        ],
+    },
+    {
         "id": "router-create",
         "title": "Create router",
         # Both dashboards, because the admin form subclasses the project one
@@ -333,6 +380,43 @@ FORMS = [
         ],
     },
     {
+        "id": "router-update",
+        "title": "Update router",
+        # Both dashboards again: the admin form subclasses the project one and
+        # overrides nothing but redirect_url, so the two submissions are
+        # identical and one rule describes both.
+        "url": r"/(admin|project)/routers/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.admin.routers.forms"
+                ":UpdateForm",
+        "routes": [
+            "horizon:admin:routers:update",
+            "horizon:project:routers:update",
+        ],
+        "method": "PUT",
+        "endpoint": NETWORK + "/routers/{id}",
+        "envelope": "router",
+        "command": ["openstack", "router", "set"],
+        # ha is deliberately unmapped, and uncovered() lists it. The form
+        # declares it and then deletes it in __init__ every single time --
+        # Neutron has not allowed it on a PUT since bug 1378525 -- so it is
+        # never submitted, and a boolean naming its off side would put --no-ha
+        # on every router edit. base_fields cannot see a field deleted at
+        # runtime, so validate() would not catch that either.
+        "fields": [
+            opt("name", "--name"),
+            boolean("admin_state", "admin_state_up",
+                    on="--enable", off="--disable"),
+            # Present only where the deployment permits DVR, and offering no
+            # "server default": handle sends the key only in that case, which
+            # is already what an unlisted value means to choice().
+            choice("mode", "distributed", {
+                "centralized": ("--centralized", False),
+                "distributed": ("--distributed", True),
+            }),
+            target(),
+        ],
+    },
+    {
         "id": "project-create",
         "title": "Create project",
         # Projects are the identity dashboard's default panel, so the panel
@@ -356,6 +440,37 @@ FORMS = [
         ],
     },
     {
+        "id": "project-update",
+        # Loosest pattern in the table, because projects are the identity
+        # dashboard's default panel and their paths carry no slug. It stays
+        # exact all the same: every other identity panel puts its slug between
+        # /identity/ and the id, which is one segment more than [^/]+ allows.
+        "title": "Update project",
+        "url": r"/identity/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.identity.projects.workflows"
+                ":UpdateProjectInfoAction",
+        "routes": ["horizon:identity:projects:update"],
+        "method": "PATCH",
+        "endpoint": IDENTITY + "/projects/{id}",
+        "envelope": "project",
+        "command": ["openstack", "project", "set"],
+        # The workflow's other steps edit member and group role assignments,
+        # which are one API call per change against a membership list
+        # Astrolabe never sees. Only the first step is described. See Known
+        # limits.
+        #
+        # domain_id and domain_name are unmapped, and uncovered() lists them.
+        # Keystone does not let a project change domain, and --domain on
+        # "project set" only disambiguates a name, which this command does not
+        # use: it names the id.
+        "fields": [
+            opt("name", "--name"),
+            opt("description", "--description"),
+            boolean("enabled", "enabled", on="--enable", off="--disable"),
+            target(),
+        ],
+    },
+    {
         "id": "domain-create",
         "title": "Create domain",
         "url": r"/identity/domains/create/?$",
@@ -373,6 +488,26 @@ FORMS = [
         ],
     },
     {
+        "id": "domain-update",
+        "title": "Update domain",
+        "url": r"/identity/domains/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.identity.domains.workflows"
+                ":UpdateDomainInfoAction",
+        "routes": ["horizon:identity:domains:update"],
+        "method": "PATCH",
+        "endpoint": IDENTITY + "/domains/{id}",
+        "envelope": "domain",
+        "command": ["openstack", "domain", "set"],
+        # As with the project workflow, the user and group steps are role
+        # assignments made one call at a time. See Known limits.
+        "fields": [
+            opt("name", "--name"),
+            opt("description", "--description"),
+            boolean("enabled", "enabled", on="--enable", off="--disable"),
+            target(),
+        ],
+    },
+    {
         "id": "group-create",
         "title": "Create group",
         "url": r"/identity/groups/create/?$",
@@ -386,6 +521,29 @@ FORMS = [
         "fields": [
             opt("description", "--description"),
             arg("name"),
+        ],
+    },
+    {
+        "id": "group-update",
+        "title": "Update group",
+        "url": r"/identity/groups/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.identity.groups.forms"
+                ":UpdateGroupForm",
+        "routes": ["horizon:identity:groups:update"],
+        "method": "PATCH",
+        "endpoint": IDENTITY + "/groups/{id}",
+        "envelope": "group",
+        "command": ["openstack", "group", "set"],
+        # The form submits group_id in a hidden field too, and uncovered()
+        # lists it as unmapped. The path carries the same value, and the path
+        # is where every other edit rule reads it from; one way in beats two.
+        # It is also the checkable one, since validate() can confirm a capture
+        # group still lands on the id and cannot confirm anything about a
+        # hidden field's contents.
+        "fields": [
+            opt("name", "--name"),
+            opt("description", "--description"),
+            target(),
         ],
     },
     {
@@ -419,6 +577,37 @@ FORMS = [
         ],
     },
     {
+        "id": "user-update",
+        "title": "Update user",
+        "url": r"/identity/users/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.identity.users.forms"
+                ":UpdateUserForm",
+        "routes": ["horizon:identity:users:update"],
+        "method": "PATCH",
+        "endpoint": IDENTITY + "/users/{id}",
+        "envelope": "user",
+        "command": ["openstack", "user", "set"],
+        # Four fields are unmapped, and uncovered() lists them. id comes from
+        # the path instead; domain_id and domain_name are read-only on this
+        # form and handle pops both before the call, because a user cannot
+        # change domain and --domain on "user set" only disambiguates a name;
+        # lock_password is dropped by read_fields for the reason user-create
+        # already records.
+        #
+        # Horizon leaves project and description out of the PATCH unless the
+        # operator actually edited them. Astrolabe cannot see changed_data, so
+        # it renders them whenever they hold a value. The result sets a field
+        # to what it already contains, which is a longer command rather than a
+        # wrong one.
+        "fields": [
+            opt("name", "--name"),
+            opt("project", "--project", api="default_project_id"),
+            opt("email", "--email"),
+            opt("description", "--description"),
+            target(),
+        ],
+    },
+    {
         "id": "role-create",
         "title": "Create role",
         # Only reachable when ANGULAR_FEATURES['roles_panel'] is False. It
@@ -435,6 +624,26 @@ FORMS = [
         "command": ["openstack", "role", "create"],
         "fields": [
             arg("name"),
+        ],
+    },
+    {
+        "id": "role-update",
+        "title": "Update role",
+        # Behind the same Angular flag as role-create, and reachable on the
+        # same terms.
+        "url": r"/identity/roles/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.identity.roles.forms"
+                ":UpdateRoleForm",
+        "routes": ["horizon:identity:roles:update"],
+        "method": "PATCH",
+        "endpoint": IDENTITY + "/roles/{id}",
+        "envelope": "role",
+        "command": ["openstack", "role", "set"],
+        # A hidden id is submitted as well, and uncovered() lists it. The
+        # path is where this rule reads it from, as on every other edit.
+        "fields": [
+            opt("name", "--name"),
+            target(),
         ],
     },
 ]

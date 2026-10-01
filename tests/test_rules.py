@@ -350,6 +350,28 @@ class TestTranslate(unittest.TestCase):
             out["calls"][0]["body"]["volume_type"][
                 "os-volume-type-access:is_public"], False)
 
+    def test_volume_type_update_uses_cinders_other_spelling(self):
+        # The create call takes "os-volume-type-access:is_public" and the
+        # update call takes a plain "is_public". Getting that backwards is a
+        # 400 the operator only finds out about by running the command.
+        out = translate.translate("/admin/volume_types/vt-1/update_type/", {
+            "name": "ssd", "description": "Fast disks", "is_public": "on",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack volume type set --name ssd --description 'Fast disks' "
+            "--public vt-1")
+        body = out["calls"][0]["body"]["volume_type"]
+        self.assertIs(body["is_public"], True)
+        self.assertNotIn("os-volume-type-access:is_public", body)
+        self.assertEqual(out["calls"][0]["url"], "$OS_VOLUME_API/types/vt-1")
+
+    def test_volume_type_update_does_not_poach_the_encryption_panel(self):
+        # update_type_encryption sits beside update_type on the same id, and
+        # is a different resource entirely.
+        self.assertIsNone(translate.translate(
+            "/admin/volume_types/vt-1/update_type_encryption/", {"name": "x"}))
+
     def test_network_create_maps_provider_attributes(self):
         out = translate.translate("/admin/networks/create/", {
             "name": "provider1", "tenant_id": "abc123", "network_type": "vlan",
@@ -448,6 +470,21 @@ class TestTranslate(unittest.TestCase):
                                   {"name": "spare"})
         self.assertEqual(out["cli"], "openstack aggregate create spare")
 
+    def test_aggregate_update_names_the_aggregate_from_the_url(self):
+        out = translate.translate("/admin/aggregates/7/update/", {
+            "name": "gpu-nodes", "availability_zone": "az-gpu",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack aggregate set --name gpu-nodes --zone az-gpu 7")
+        self.assertEqual(out["calls"][0]["url"],
+                         "$OS_COMPUTE_API/os-aggregates/7")
+        self.assertEqual(out["calls"][0]["method"], "PUT")
+
+    def test_aggregate_update_does_not_poach_the_hosts_panel(self):
+        self.assertIsNone(
+            translate.translate("/admin/aggregates/7/manage_hosts/", {}))
+
     def test_aggregate_deletes_use_horizons_host_aggregates_table(self):
         out = translate.translate("/admin/aggregates/", {
             "action": "host_aggregates__delete__7",
@@ -532,6 +569,37 @@ class TestTranslate(unittest.TestCase):
         })
         self.assertEqual(out["cli"], "openstack router create mine")
         self.assertNotIn("tenant_id", out["calls"][0]["body"]["router"])
+
+    def test_router_update_is_recorded_from_either_dashboard(self):
+        for url in ("/admin/routers/r-1/update", "/project/routers/r-1/update"):
+            with self.subTest(url):
+                out = translate.translate(url, {
+                    "name": "edge", "admin_state": "on", "mode": "distributed",
+                })
+                self.assertEqual(
+                    out["cli"],
+                    "openstack router set --name edge --enable --distributed "
+                    "r-1")
+                self.assertEqual(out["calls"][0]["url"],
+                                 "$OS_NETWORK_API/routers/r-1")
+
+    def test_router_update_says_nothing_about_ha(self):
+        # The form declares ha and then deletes it on every request, so it is
+        # never submitted. A rule mapping it would stamp --no-ha onto every
+        # router edit an operator makes.
+        out = translate.translate("/admin/routers/r-1/update",
+                                  {"name": "edge", "ha": "on"})
+        self.assertNotIn("ha", out["cli"])
+        self.assertNotIn("ha", out["calls"][0]["body"]["router"])
+
+    def test_a_router_edit_without_dvr_leaves_the_mode_alone(self):
+        # Horizon deletes the mode field where DVR is not permitted, and sends
+        # no "distributed" key. An absent select must read the same way.
+        out = translate.translate("/admin/routers/r-1/update",
+                                  {"name": "edge", "admin_state": "on"})
+        self.assertEqual(out["cli"],
+                         "openstack router set --name edge --enable r-1")
+        self.assertNotIn("distributed", out["calls"][0]["body"]["router"])
 
     def test_router_deletes_come_from_the_routers_table(self):
         out = translate.translate("/admin/routers/", {
@@ -645,6 +713,87 @@ class TestTranslate(unittest.TestCase):
             with self.subTest(url=url):
                 out = translate.translate(url, {"name": "x"})
                 self.assertTrue(out["cli"].startswith(prefix), out["cli"])
+
+    def test_each_identity_edit_url_reaches_its_own_rule(self):
+        """The edit side of the nesting, which is tighter than the create side.
+
+        ``/identity/<id>/update/`` is the project form, and it is one segment
+        short of every other panel's edit path. A pattern that reached any of
+        them would rename a user by issuing ``project set``.
+        """
+        expected = {
+            "/identity/p-1/update/": "openstack project set",
+            "/identity/domains/d-1/update/": "openstack domain set",
+            "/identity/groups/g-1/update/": "openstack group set",
+            "/identity/roles/r-1/update/": "openstack role set",
+            "/identity/users/u-1/update/": "openstack user set",
+        }
+        for url, prefix in expected.items():
+            with self.subTest(url=url):
+                out = translate.translate(url, {"name": "renamed"})
+                self.assertTrue(out["cli"].startswith(prefix), out["cli"])
+                # The id is the last word, and it is the one in the path.
+                self.assertEqual(out["cli"].rsplit(" ", 1)[-1],
+                                 url.split("/")[-3])
+
+    def test_a_project_edit_turns_both_sides_of_the_enabled_box(self):
+        enabled = translate.translate("/identity/p-1/update/", {
+            "name": "engineering", "description": "R&D", "enabled": "on",
+        })
+        self.assertEqual(
+            enabled["cli"],
+            "openstack project set --name engineering --description 'R&D' "
+            "--enable p-1")
+        self.assertEqual(enabled["calls"][0]["method"], "PATCH")
+        disabled = translate.translate("/identity/p-1/update/",
+                                       {"name": "engineering"})
+        self.assertIn("--disable", disabled["cli"])
+        self.assertIs(disabled["calls"][0]["body"]["project"]["enabled"],
+                      False)
+
+    def test_a_project_edit_never_claims_to_move_the_domain(self):
+        # The form submits domain_id read-only and handle discards it.
+        # Rendering --domain would describe a change Keystone does not allow.
+        out = translate.translate("/identity/p-1/update/", {
+            "name": "engineering", "domain_id": "d-1", "domain_name": "Default",
+            "enabled": "on",
+        })
+        self.assertNotIn("--domain", out["cli"])
+        self.assertNotIn("domain_id", out["calls"][0]["body"]["project"])
+
+    def test_a_group_edit_takes_the_id_from_the_path_not_the_hidden_field(self):
+        # Both carry it. Only one of them is a place validate() can check.
+        out = translate.translate("/identity/groups/g-1/update/", {
+            "group_id": "g-stale", "name": "operators",
+            "description": "On call",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack group set --name operators --description 'On call' g-1")
+        self.assertEqual(out["calls"][0]["url"], "$OS_IDENTITY_API/groups/g-1")
+        self.assertNotIn("g-stale", json.dumps(out))
+
+    def test_a_user_edit_renders_what_horizon_sends_and_nothing_else(self):
+        out = translate.translate("/identity/users/u-1/update/", {
+            "id": "u-1", "name": "alice", "project": "p-2",
+            "email": "alice@example.com", "description": "SRE",
+            "domain_id": "d-1", "domain_name": "Default",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack user set --name alice --project p-2 "
+            "--email alice@example.com --description SRE u-1")
+        body = out["calls"][0]["body"]["user"]
+        self.assertEqual(body["default_project_id"], "p-2")
+        self.assertNotIn("domain_id", body)
+        self.assertNotIn("id", body)
+
+    def test_a_password_change_is_not_a_user_edit(self):
+        # change_password is its own panel on the same id, and its field is
+        # one read_fields drops anyway. It must not be mistaken for an edit.
+        self.assertIsNone(translate.translate(
+            "/identity/users/u-1/change_password/",
+            translate.read_fields({"password": ["hunter2"]})))
 
     def test_project_deletes_come_from_horizons_tenants_table(self):
         out = translate.translate("/identity/", {

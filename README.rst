@@ -137,9 +137,21 @@ Create role                    ``openstack role create``
 Create user                    ``openstack user create``
 Create host aggregate          ``openstack aggregate create``
 Create router                  ``openstack router create``
+Edit volume type               ``openstack volume type set``
 Edit network (admin)           ``openstack network set``
+Edit project                   ``openstack project set``
+Edit domain                    ``openstack domain set``
+Edit group                     ``openstack group set``
+Edit role                      ``openstack role set``
+Edit user                      ``openstack user set``
+Edit host aggregate            ``openstack aggregate set``
+Edit router                    ``openstack router set``
 Delete, on any of the above    ``openstack <resource> delete``
 ============================== ====================================
+
+Every create has a matching edit except flavors, which Horizon does not let you
+edit: its "Edit Flavor" button changes which projects may use the flavor, and
+nothing about the flavor itself. See Known limits.
 
 Deletes are handled by one generic rule that decodes Horizon's
 ``<table>__<action>__<id>`` action encoding, so row actions and multi-select
@@ -149,10 +161,10 @@ batch deletes both work.
 Roles are the exception to "it just works". Horizon ships the roles panel as
 its AngularJS variant by default (``ANGULAR_FEATURES['roles_panel']``), and
 that variant POSTs to ``/api/*`` rather than submitting a Django form, so
-**neither creates nor deletes are recorded there** — in that mode the Django
-create view is not even routed. The rules are present and correct, and start
-recording as soon as the panel is the Django one, which is also what happens
-when the Angular variant is eventually removed upstream.
+**nothing is recorded there** — in that mode the Django create and edit views
+are not even routed. The rules are present and correct, and start recording as
+soon as the panel is the Django one, which is also what happens when the
+Angular variant is eventually removed upstream.
 
 To opt in now, drop a file in ``local_settings.d`` and restart::
 
@@ -184,18 +196,21 @@ resource wherever Horizon uses it; the handful of other places the names turn
 up are ``LinkAction`` classes, which are ordinary links and never POST a
 delete.
 
-Creates are matched by URL, one rule at a time, so each rule has to say which
-dashboards it covers. Most of them need only one: flavors, volume types and
-host aggregates exist solely in the admin dashboard, and projects, domains,
-groups, roles and users solely in identity. Routers are the exception and the
-rule covers both, because the admin form subclasses the project one and adds
-nothing but the project selector.
+Creates and edits are matched by URL, one rule at a time, so each rule has to
+say which dashboards it covers. Most of them need only one: flavors, volume
+types and host aggregates exist solely in the admin dashboard, and projects,
+domains, groups, roles and users solely in identity. Routers are the exception
+and both router rules cover both dashboards, because the admin forms subclass
+the project ones and add nothing but a project selector on the create side and
+a redirect on the edit side.
 
-Networks are the case where that shortcut does not hold. The admin panel is a
-plain form; the project panel is a multi-step workflow that creates a subnet
-alongside the network, under different field names, and it would be a separate
-rule producing more than one command. It is not covered, so an admin creating
-a network from the project dashboard gets nothing — see Known limits.
+Networks are the case where that shortcut does not hold, on both sides. The
+admin create panel is a plain form; the project one is a multi-step workflow
+that creates a subnet alongside the network, under different field names, and
+it would be a separate rule producing more than one command. The two edit
+panels are separate classes too, and there the mismatch is worse than a gap:
+see Known limits. Neither project-side panel is covered, so an admin working
+on a network from the project dashboard gets nothing.
 
 Endpoints and the token
 -----------------------
@@ -482,6 +497,14 @@ id and then checks the rule's group caught *that*, because a pattern can
 match the path while its group lands on the wrong segment, and a command
 built against the wrong resource is worse than one that never fires.
 
+Checkboxes change meaning on an edit, and a rule has to follow. A create form
+lets an unticked box mean "leave the default alone", so the rule names only
+the side worth saying — ``boolean("shared", "shared", on="--share")``. An edit
+form builds its request from every field each time, so an unticked box there
+is a decision, and the rule names both sides. One side on an edit rule records
+the operator turning something on and stays silent when they turn it off,
+which reads as though they never touched it.
+
 Set ``form`` to the Horizon class the rule targets, as
 ``"module:ClassName"``. That is what lets ``validate()`` check the rule against
 the real form. You do not need to look the field names up by hand::
@@ -489,8 +512,8 @@ the real form. You do not need to look the field names up by hand::
     >>> from astrolabe import rules
     >>> rules.validate()     # [] when every field still exists
     []
-    >>> rules.uncovered()    # form fields no rule mentions
-    {'network-create': ['with_subnet']}
+    >>> rules.uncovered()['router-update']    # fields no rule mentions
+    ['ha']
 
 If the declarative vocabulary cannot express a new panel, extend both
 ``rules.py`` and ``translate.py``'s ``_apply_form`` together, and add a case to
@@ -573,9 +596,13 @@ Known limits
   form you are filling in. Do your work, then go and collect the commands.
 * Panels switched to their AngularJS variants via ``ANGULAR_FEATURES`` POST
   JSON to Horizon's ``/api/*`` proxy instead of submitting a Django form, and
-  are not recorded — creates or deletes. Of the panels Astrolabe knows about,
+  are not recorded at all. Of the panels Astrolabe knows about,
   ``roles_panel`` defaults to Angular and ``flavors_panel`` does not; see the
   note under *What v1 covers* for how to switch a panel back.
+* **Clearing a field on an edit form is not recorded.** An empty value is
+  skipped, which is right on a create — nothing was supplied — and wrong on an
+  edit, where emptying the description box means delete the description. The
+  recorded command leaves it as it was. Add ``--description ''`` yourself.
 * **Create user is deliberately incomplete in two places.** Astrolabe never
   reads the password, so the command ends up with ``--password-prompt`` and the
   ``curl`` body has no password in it at all — the CLI form asks you at run
@@ -583,6 +610,13 @@ Known limits
   primary role in a second API call, which one command cannot express, so the
   recorded ``openstack user create`` leaves the new user unroled. Add the
   matching ``openstack role add`` yourself.
+* **Edit user names fields Horizon would have left out.** Horizon drops the
+  primary project and the description from its request unless you actually
+  changed them; Astrolabe sees the submitted form and not which boxes were
+  touched, so it renders both whenever they hold a value. The command sets
+  them to what they already are, which is longer than it needs to be rather
+  than wrong. Neither the password nor the domain is recorded: the password is
+  changed on a panel of its own, and Keystone does not let a user move domain.
 * **Network create is recorded from the admin panel only.** The project
   panel is a different form — a workflow that also creates a subnet — and
   needs a rule of its own. See "Which dashboard a panel lives in".
@@ -610,6 +644,18 @@ Known limits
   per host, which a rule describing one form and one command cannot express.
   The recorded command creates an empty aggregate; add the matching
   ``openstack aggregate add host`` calls yourself.
+* **Edit project and edit domain record only their first step.** Both are
+  workflows whose remaining steps add and remove member and group role
+  assignments, one API call per change, against a membership list Astrolabe
+  never sees. The recorded command covers the name, description and enabled
+  state; the role changes made in the same dialog are not recorded. Editing
+  the host list of an aggregate is a separate panel and is not recorded
+  either, for the same reason.
+* **Flavors cannot be edited, by Horizon or by Astrolabe.** The "Edit Flavor"
+  button opens a form that changes which projects may use the flavor, not the
+  flavor, and it issues one call per project added or removed. That is
+  ``openstack flavor set --project`` and ``flavor unset --project``, as many
+  commands as projects changed, which is not something one rule can describe.
 * Rendered commands reproduce what was submitted. They are a starting point for
   a script, not a tested one — read them before you run them.
 * The ``curl`` equivalents target the real service APIs, not Horizon's proxy, so
