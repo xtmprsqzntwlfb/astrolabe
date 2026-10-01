@@ -47,7 +47,7 @@ from astrolabe import store  # noqa: E402
 from astrolabe import translate  # noqa: E402
 
 KINDS = {"value", "flag", "multi", "positional", "redacted",
-         "choice"}
+         "choice", "target"}
 
 
 class Post(dict):
@@ -122,14 +122,39 @@ class TestRuleSet(unittest.TestCase):
                 with self.subTest(form["id"], field=field["field"]):
                     self.assertIn(field["kind"], KINDS)
 
-    def test_each_form_has_exactly_one_positional(self):
-        # The interpreter appends positionals last; more than one would make
+    def test_each_form_has_exactly_one_trailing_argument(self):
+        # The interpreter appends these last; more than one would make
         # argument order depend on rule order, which is too subtle to allow.
+        # A create names its subject (positional), an edit names the resource
+        # it is editing (target), and no rule does both.
         for form in rules.FORMS:
-            positionals = [f for f in form["fields"]
-                           if f["kind"] == "positional"]
+            trailing = [f for f in form["fields"]
+                        if f["kind"] in ("positional", "target")]
             with self.subTest(form["id"]):
-                self.assertEqual(len(positionals), 1)
+                self.assertEqual(len(trailing), 1)
+
+    def test_a_rule_captures_an_id_exactly_when_it_needs_one(self):
+        # The id reaches the command through a target field and the REST path
+        # through the endpoint's {id}, and both read the same capture group.
+        # Half of that arrangement is worse than none: an endpoint left with
+        # a literal "{id}" in it, or a command missing its resource.
+        for form in rules.FORMS:
+            captures = "(?P<id>" in form["url"]
+            targets = any(f["kind"] == "target" for f in form["fields"])
+            in_endpoint = "{id}" in form["endpoint"]
+            with self.subTest(form["id"]):
+                self.assertEqual(captures, targets)
+                self.assertEqual(captures, in_endpoint)
+
+    def test_targets_carry_no_api_key(self):
+        # An id says which resource is being changed, not what it should
+        # become. Neutron rejects it as an attribute of the body.
+        for form in rules.FORMS:
+            for field in form["fields"]:
+                if field["kind"] != "target":
+                    continue
+                with self.subTest(form["id"]):
+                    self.assertNotIn("api", field)
 
     def test_api_keys_do_not_collide(self):
         # Redacted fields have no api key at all: they contribute nothing to
@@ -343,6 +368,60 @@ class TestTranslate(unittest.TestCase):
         self.assertEqual(body["provider:segmentation_id"], 101)
         self.assertIs(body["admin_state_up"], True)
         self.assertEqual(body["availability_zone_hints"], ["nova", "az2"])
+
+    def test_network_update_takes_its_subject_from_the_url(self):
+        out = translate.translate(
+            "/admin/networks/9f2c7b1e-aaaa-bbbb-cccc-0123456789ab/update/", {
+                "name": "renamed", "admin_state": "on", "shared": "on",
+                "external": "on",
+            })
+        self.assertEqual(
+            out["cli"],
+            "openstack network set --name renamed --enable --share "
+            "--external 9f2c7b1e-aaaa-bbbb-cccc-0123456789ab")
+        self.assertEqual(out["title"],
+                         "Update network 9f2c7b1e-aaaa-bbbb-cccc-0123456789ab")
+
+    def test_network_update_puts_the_id_in_the_path_not_the_body(self):
+        out = translate.translate("/admin/networks/net-7/update/",
+                                  {"name": "renamed", "admin_state": "on"})
+        call = out["calls"][0]
+        self.assertEqual(call["method"], "PUT")
+        self.assertEqual(call["url"], "$OS_NETWORK_API/networks/net-7")
+        body = call["body"]["network"]
+        self.assertEqual(body["name"], "renamed")
+        self.assertNotIn("id", body)
+        self.assertNotIn("{id}", json.dumps(out))
+
+    def test_an_unticked_box_on_an_edit_is_an_explicit_off(self):
+        # UpdateNetwork.handle sends all four keys every time, so unticking
+        # "Shared" on an edit means unshare. The same empty box on a create
+        # only means the operator left the default alone.
+        out = translate.translate("/admin/networks/net-7/update/",
+                                  {"name": "quiet"})
+        self.assertEqual(
+            out["cli"],
+            "openstack network set --name quiet --disable --no-share "
+            "--internal net-7")
+        body = out["calls"][0]["body"]["network"]
+        self.assertIs(body["shared"], False)
+        self.assertIs(body["router:external"], False)
+        self.assertIs(body["admin_state_up"], False)
+
+    def test_the_update_rule_does_not_poach_nested_update_urls(self):
+        # The networks panel also edits subnets and ports, both of them one
+        # path segment deeper. Matching those would build a network command
+        # against a subnet id.
+        for path in ("/admin/networks/net-7/subnets/sub-1/update",
+                     "/admin/networks/net-7/ports/port-1/update"):
+            with self.subTest(path):
+                self.assertIsNone(translate.translate(path, {"name": "x"}))
+
+    def test_creating_and_updating_a_network_stay_separate(self):
+        created = translate.translate("/admin/networks/create/",
+                                      {"name": "n1", "admin_state": "on"})
+        self.assertEqual(created["calls"][0]["method"], "POST")
+        self.assertIn("network create", created["cli"])
 
     def test_unchecked_admin_state_becomes_disable(self):
         out = translate.translate("/admin/networks/create/", {
@@ -1143,6 +1222,25 @@ class TestAgainstHorizon(unittest.TestCase):
         self.assertIn("cannot fire", problems[0])
         self.assertEqual(rules.validate(), [])
 
+    def test_validate_detects_an_id_captured_from_the_wrong_segment(self):
+        # An edit rule can match the path while its group lands on the wrong
+        # part of it -- Horizon adding a segment is all it takes. The command
+        # then looks entirely correct and names the wrong resource, which is
+        # worse than not matching. Matching is not enough; the capture has to
+        # line up with the id the route was reversed with.
+        rule = dict(next(one for one in rules.FORMS
+                         if one["id"] == "network-update"))
+        rule["url"] = r"/(?P<id>admin)/networks/[^/]+/update/?$"
+        original = rules.FORMS
+        rules.FORMS = [rule]
+        try:
+            problems = rules.validate()
+        finally:
+            rules.FORMS = original
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("rather than the resource", problems[0])
+        self.assertEqual(rules.validate(), [])
+
     def test_validate_detects_a_renamed_table(self):
         # A renamed table is the delete-side version of a moved panel: the
         # action field stops carrying the name we match on, and deletes go
@@ -1161,11 +1259,16 @@ class TestAgainstHorizon(unittest.TestCase):
     def test_every_route_reverses_to_something_its_rule_matches(self):
         # validate() covers this, but a failure there names one rule among
         # many. This reports each panel separately.
-        from django.urls import reverse
         for form in rules.FORMS:
+            wants_id = "(?P<id>" in form["url"]
             for name in form["routes"]:
                 with self.subTest(form["id"], route=name):
-                    self.assertRegex(reverse(name), form["url"])
+                    path, stand_in = rules._reverse_route(name, wants_id)
+                    self.assertIsNotNone(path, "%s no longer reverses" % name)
+                    self.assertRegex(path, form["url"])
+                    if stand_in is not None:
+                        match = re.search(form["url"], path)
+                        self.assertEqual(match.group("id"), stand_in)
 
     def test_uncovered_fields_are_reported_for_review(self):
         # Not a failure: plenty of fields are deliberately unmapped. Printed

@@ -124,12 +124,61 @@ def _put(body, path, value):
     body[keys[-1]] = value
 
 
-def _apply_form(spec, fields):
+def _endpoint(spec, captured):
+    """The REST path, with anything captured from the URL substituted in.
+
+    An edit rule's endpoint carries the resource id -- "/networks/{id}" --
+    because the id says which resource is being changed rather than what it
+    should become, so it belongs in the path and not in the body. Create
+    rules capture nothing and their endpoints pass through untouched.
+    """
+    url = spec["endpoint"]
+    for name, value in captured.items():
+        url = url.replace("{%s}" % name, str(value))
+    return url
+
+
+def _apply_value(field, raw, parts, body):
+    """An ``opt``: a value behind a flag, with the rule's omissions applied.
+
+    Lifted out of _apply_form, which Horizon's flake8 complexity limit will
+    not hold otherwise. The two branchiest kinds live on their own.
+    """
+    raw = _scalar(raw)
+    if _blank(raw):
+        return
+    absent = field["absentWhen"]
+    if absent is not None and str(raw) == str(absent):
+        return
+    omit = field["omitWhen"]
+    if omit is None or str(raw) != str(omit):
+        parts += [field["flag"], shq(raw)]
+    value = _cast(raw, field["cast"])
+    if value is not None:
+        _put(body, field["api"], value)
+
+
+def _apply_boolean(field, raw, parts, body):
+    """A checkbox: whichever side of it the rule names."""
+    on = _checked(raw)
+    if on and field["on"]:
+        parts.append(field["on"])
+    elif not on and field["off"]:
+        parts.append(field["off"])
+    _put(body, field["api"], on)
+
+
+def _apply_form(spec, fields, captured=None):
     """Apply one form rule to a submission.
+
+    ``captured`` holds the named groups from the rule's URL pattern, which is
+    where an edit form's resource id comes from: the form submits what the
+    resource should become, and the path says which one.
 
     Positionals are collected and appended last regardless of where they
     appear in the rule, because that is where the openstack CLI wants them.
     """
+    captured = captured or {}
     parts = list(spec["command"])
     trailing = []
     body = {}
@@ -140,26 +189,10 @@ def _apply_form(spec, fields):
         kind = field["kind"]
 
         if kind == "value":
-            raw = _scalar(raw)
-            if _blank(raw):
-                continue
-            absent = field["absentWhen"]
-            if absent is not None and str(raw) == str(absent):
-                continue
-            omit = field["omitWhen"]
-            if omit is None or str(raw) != str(omit):
-                parts += [field["flag"], shq(raw)]
-            value = _cast(raw, field["cast"])
-            if value is not None:
-                _put(body, field["api"], value)
+            _apply_value(field, raw, parts, body)
 
         elif kind == "flag":
-            on = _checked(raw)
-            if on and field["on"]:
-                parts.append(field["on"])
-            elif not on and field["off"]:
-                parts.append(field["off"])
-            _put(body, field["api"], on)
+            _apply_boolean(field, raw, parts, body)
 
         elif kind == "choice":
             # A select where each option is its own flag, and anything not
@@ -194,13 +227,23 @@ def _apply_form(spec, fields):
             _put(body, field["api"], str(raw))
             subject = str(raw)
 
+        elif kind == "target":
+            # Not from the submission: see rules.target(). It trails the
+            # command and reaches the REST call through _endpoint, never
+            # through the body.
+            found = captured.get(field["field"])
+            if _blank(found):
+                continue
+            trailing.append(shq(found))
+            subject = str(found)
+
     return {
         "title": "%s %s" % (spec["title"], subject) if subject
                  else spec["title"],
         "cli": " ".join(parts + trailing),
         "calls": [{
             "method": spec["method"],
-            "url": spec["endpoint"],
+            "url": _endpoint(spec, captured),
             "body": {spec["envelope"]: body},
         }],
     }
@@ -245,8 +288,9 @@ def _pattern(expression):
 def translate(url, fields):
     """Translate a submission, or return None if no rule claims it."""
     for form in rules.FORMS:
-        if _pattern(form["url"]).search(url):
-            return _apply_form(form, fields)
+        match = _pattern(form["url"]).search(url)
+        if match:
+            return _apply_form(form, fields, match.groupdict())
     action = _scalar(fields.get("action"))
     if isinstance(action, str) and _DELETE_ACTION.match(action):
         return _apply_delete(fields)

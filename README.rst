@@ -55,12 +55,13 @@ handful of forms it explicitly understands::
                        rules.py
 
 The rules live in Python, in ``astrolabe/rules.py``, which is pure data plus
-its own self-check. ``rules.validate()`` confirms all three things a rule
-depends on, because they drift independently: the form class and its field
-names, the URL the rule matches on (reversed from the Horizon URL name the
-rule records, since the name is the stable handle and the path is what moves),
-and the table name deletes arrive under. A rule can be perfectly correct about
-its fields and still never fire. All three surface as a logged warning rather
+its own self-check. ``rules.validate()`` confirms everything a rule depends
+on upstream, because those things drift independently: the form class and its
+field names, the URL the rule matches on (reversed from the Horizon URL name
+the rule records, since the name is the stable handle and the path is what
+moves), where an edit rule's pattern finds the resource id in that path, and
+the table name deletes arrive under. A rule can be perfectly correct about
+its fields and still never fire. All of it surfaces as a logged warning rather
 than a silently incomplete — or silently absent — command. The check runs
 once, on the first submission a rule matches, and its failures are logged
 rather than raised.
@@ -136,6 +137,7 @@ Create role                    ``openstack role create``
 Create user                    ``openstack user create``
 Create host aggregate          ``openstack aggregate create``
 Create router                  ``openstack router create``
+Edit network (admin)           ``openstack network set``
 Delete, on any of the above    ``openstack <resource> delete``
 ============================== ====================================
 
@@ -415,7 +417,7 @@ Extending the rule table
 
 Adding a panel means adding one entry to ``FORMS`` in ``astrolabe/rules.py``.
 Nothing else changes. A rule names the URL it matches, the command and
-endpoint it maps to, and the fields it carries. Six field kinds cover
+endpoint it maps to, and the fields it carries. Seven field kinds cover
 everything so far:
 
 ``opt(field, flag, api, cast, omit_when, absent_when)``
@@ -445,6 +447,14 @@ everything so far:
 ``arg(field, api)``
     A positional argument. Always rendered last, as the CLI expects.
 
+``target(group)``
+    The resource an edit form is editing, read out of the URL rather than
+    the submission. An edit form sends what the resource should become; the
+    path says which one. It trails the command like any positional and
+    reaches the REST call through the ``{id}`` in the rule's endpoint, never
+    through the body — an id identifies a resource rather than describing
+    it, and Neutron rejects it as an attribute.
+
 ``redacted(field, flag)``
     Stands in for a field Astrolabe refuses to read. The secret filter drops
     password-like names before the interpreter runs, so the rule emits a
@@ -462,6 +472,15 @@ have no trailing slash (``/identity/create``,
 ``/admin/volume_types/create_type``); the test is what keeps that from being
 tidied away. A ``TABLES`` entry names the ``DataTable`` class its key came
 from, so the same check covers deletes.
+
+An edit rule carries a resource id in its path. Horizon names that capture
+group differently on every panel — ``id`` on flavors, ``network_id`` on
+networks, ``tenant_id`` on projects — but a rule matches with a pattern of
+its own, so it always writes ``(?P<id>[^/]+)`` and spells the endpoint
+``.../networks/{id}``. ``validate()`` reverses such a route with a stand-in
+id and then checks the rule's group caught *that*, because a pattern can
+match the path while its group lands on the wrong segment, and a command
+built against the wrong resource is worse than one that never fires.
 
 Set ``form`` to the Horizon class the rule targets, as
 ``"module:ClassName"``. That is what lets ``validate()`` check the rule against
@@ -539,8 +558,9 @@ It is early warning: ``validate()`` runs inside the plugin too, but by then
 somebody has upgraded and lost a recording.
 
 Layer 4 stages each drift it claims to catch and asserts it is reported — a
-renamed field, a moved panel, a URL name that stopped reversing, a renamed
-table — so none of the four can pass vacuously.
+renamed field, a moved panel, a URL name that stopped reversing, an id
+captured from the wrong path segment, a renamed table — so none of the five
+can pass vacuously.
 
 Known limits
 ============
@@ -566,6 +586,14 @@ Known limits
 * **Network create is recorded from the admin panel only.** The project
   panel is a different form — a workflow that also creates a subnet — and
   needs a rule of its own. See "Which dashboard a panel lives in".
+* **Network edit is recorded from the admin panel only too**, and for a
+  different reason. The project form is a separate class carrying name,
+  admin state and shared, but no **External Network** box. On an edit
+  Horizon sends every one of those keys each time, so the rule emits both
+  sides of each checkbox — and a project-side submission, which never had an
+  external box to untick, would come out as ``--internal`` and claim the
+  operator turned external routing off. Missing a panel beats describing one
+  wrongly, so the rule stays pinned to ``/admin/``.
 * **A router created from the project dashboard records no owning project.**
   Only the admin form offers a project selector. From the project side Horizon
   uses whatever scope you are in, and there is no field to record, so the

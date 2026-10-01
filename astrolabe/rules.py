@@ -90,6 +90,30 @@ def arg(field, api="name"):
     return {"kind": "positional", "field": field, "api": api}
 
 
+def target(group="id"):
+    """The resource being changed, read out of the URL rather than the form.
+
+    An edit form does not submit the id of the thing it is editing; Horizon
+    puts it in the path. Every panel names that capture group differently --
+    ``id`` on flavors, ``network_id`` on networks, ``tenant_id`` on projects
+    -- but Astrolabe matches with a pattern of its own rather than Horizon's,
+    so a rule writes ``(?P<id>[^/]+)`` whatever upstream calls it and this
+    reads it back.
+
+    It trails the command like any other positional, and reaches the REST
+    call through the ``{id}`` in the rule's endpoint. Nothing goes in the
+    body: an id identifies the resource rather than describing it, and
+    Neutron would reject it as an attribute. It carries no ``api`` key at
+    all, for the same reason :func:`redacted` does not.
+    """
+    return {"kind": "target", "field": group}
+
+
+#: Kinds whose ``field`` names a URL capture group rather than a form field.
+#: validate() must not go looking for these in ``base_fields``.
+FROM_URL = frozenset(["target"])
+
+
 def choice(field, api, choices):
     """A select where each option carries its own flag and its own API value.
 
@@ -207,6 +231,39 @@ FORMS = [
             repeated("az_hints", "--availability-zone-hint",
                      "availability_zone_hints"),
             arg("name"),
+        ],
+    },
+    {
+        "id": "network-update",
+        "title": "Update network",
+        # Admin only, unlike the router rule, which covers both dashboards.
+        # The project form is a separate class carrying name, admin_state and
+        # shared but not external. On a create an absent checkbox is just a
+        # default, but on an update Horizon sends all four keys every time, so
+        # the rule has to emit both sides of each -- and then a project-side
+        # submission, which never had an "external" box to untick, would
+        # render --internal and claim the operator turned external routing
+        # off. Missing a panel beats describing one wrongly. See Known limits.
+        "url": r"/admin/networks/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.admin.networks.forms"
+                ":UpdateNetwork",
+        "routes": ["horizon:admin:networks:update"],
+        "method": "PUT",
+        "endpoint": NETWORK + "/networks/{id}",
+        "envelope": "network",
+        "command": ["openstack", "network", "set"],
+        # Every boolean here names both sides. UpdateNetwork.handle builds its
+        # params unconditionally from all four fields, so an unticked box on
+        # an edit is a decision -- "make this not shared" -- in a way the same
+        # unticked box on a create is not.
+        "fields": [
+            opt("name", "--name"),
+            boolean("admin_state", "admin_state_up",
+                    on="--enable", off="--disable"),
+            boolean("shared", "shared", on="--share", off="--no-share"),
+            boolean("external", "router:external",
+                    on="--external", off="--internal"),
+            target(),
         ],
     },
     {
@@ -446,6 +503,26 @@ def _load_form(target):
     return getattr(import_module(module_name), class_name)
 
 
+#: Stood into an edit panel's URL when reversing it. Two of them because
+#: Horizon's id patterns are usually ``[^/]+`` but occasionally numeric, and
+#: a placeholder the pattern rejects would look exactly like a moved panel.
+_STAND_INS = ("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9", "1")
+
+
+def _reverse_route(name, wants_id):
+    """The path a URL name resolves to, or None if it no longer resolves."""
+    from django.urls import NoReverseMatch
+    from django.urls import reverse
+
+    attempts = [(stand_in,) for stand_in in _STAND_INS] if wants_id else [()]
+    for args in attempts:
+        try:
+            return reverse(name, args=args), (args[0] if args else None)
+        except NoReverseMatch:
+            continue
+    return None, None
+
+
 def _check_routes(form, problems):
     """Confirm a rule's url pattern still reaches the panel it names.
 
@@ -456,22 +533,31 @@ def _check_routes(form, problems):
 
     Reversing the URL name rather than hard-coding a path is the point: the
     name is Horizon's stable handle, the path is the thing allowed to move.
-    """
-    from django.urls import NoReverseMatch
-    from django.urls import reverse
 
+    An edit panel's URL takes the resource id, so it is reversed with a
+    stand-in, and the rule's capture group is then checked to have caught that
+    stand-in and not some other segment. A pattern that matches the path while
+    capturing the wrong part of it builds a command against the wrong
+    resource, which is a worse outcome than not matching at all.
+    """
+    wants_id = "(?P<id>" in form["url"]
     for name in form["routes"]:
-        try:
-            path = reverse(name)
-        except NoReverseMatch:
+        path, stand_in = _reverse_route(name, wants_id)
+        if path is None:
             problems.append(
                 "%s: %s no longer reverses; the rule cannot fire"
                 % (form["id"], name))
             continue
-        if not re.search(form["url"], path):
+        match = re.search(form["url"], path)
+        if not match:
             problems.append(
                 "%s: %s is now %s, which %r does not match"
                 % (form["id"], name, path, form["url"]))
+        elif stand_in is not None and match.groupdict().get("id") != stand_in:
+            problems.append(
+                "%s: %s is now %s, where %r captures %r as the id rather "
+                "than the resource" % (form["id"], name, path, form["url"],
+                                       match.groupdict().get("id")))
 
 
 def _check_tables(problems):
@@ -521,6 +607,8 @@ def validate():
                 "%s: %s exposes no base_fields" % (form["id"], target))
             continue
         for field in form["fields"]:
+            if field["kind"] in FROM_URL:
+                continue
             if field["field"] not in known:
                 problems.append(
                     "%s: field %r is no longer on %s"
@@ -544,7 +632,8 @@ def uncovered():
             form_class = _load_form(target)
         except Exception:  # noqa: BLE001 - validate() reports this properly
             continue
-        mapped = {field["field"] for field in form["fields"]}
+        mapped = {field["field"] for field in form["fields"]
+                  if field["kind"] not in FROM_URL}
         missing = sorted(set(getattr(form_class, "base_fields", {})) - mapped)
         if missing:
             report[form["id"]] = missing
