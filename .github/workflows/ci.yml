@@ -3,6 +3,8 @@
 # would pin one Horizon version to every pull request, so it lives in
 # upstream.yml and runs weekly against Horizon master instead. A green run
 # here does not promise the rules still match upstream.
+#
+# Layer 5, the other upstream, is here rather than there: see the cli job.
 
 name: ci
 
@@ -60,6 +62,36 @@ jobs:
 
       - name: Tests with Django, which adds the middleware layer
         run: python tests/test_rules.py
+
+  # Layer 5: the commands the rules render are commands that exist, taking
+  # the flags the rules give them. Unlike layer 4 this one belongs on every
+  # pull request, because python-openstackclient is a release off PyPI rather
+  # than a moving checkout: installing the current one answers "do these
+  # commands work for an operator installing the CLI today", and it catches a
+  # flag typed wrong in a new rule before it is merged rather than weekly.
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install python-openstackclient
+
+      # The layer skips itself when the CLI is absent, so a failed install
+      # would leave this job green while testing nothing at all.
+      - name: Check the CLI imports, so layer 5 cannot skip
+        run: python -c "import openstackclient; print('openstackclient ok')"
+
+      - name: Report before asserting, so a failure names what drifted
+        run: |
+          python -c "
+          from astrolabe import rules
+          for problem in rules.verify_cli():
+              print('  ' + problem)
+          "
+
+      - run: python tests/test_rules.py
 
   package:
     runs-on: ubuntu-latest

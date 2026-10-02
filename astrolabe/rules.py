@@ -847,3 +847,155 @@ def uncovered():
         if missing:
             report[form["id"]] = missing
     return report
+
+
+# ------------------------------------------------------- the other upstream
+#
+# A rule straddles two projects. validate() watches the Horizon side, where
+# drift stops a rule from firing or from reading a field. This watches the
+# other side, where drift leaves the rule firing perfectly and rendering a
+# command that no longer exists -- which an operator only finds out by pasting
+# it into a shell. Nothing about the dashboard would look wrong.
+#
+# python-openstackclient is not a dependency and is not needed at runtime.
+# These functions import it where they stand, and the test layer that calls
+# them skips when it is absent, the same way the Horizon layer does.
+
+
+#: The entry point groups openstackclient registers commands in, as
+#: "openstack.<service>.v<N>". Several services still ship an older version
+#: alongside the current one, so the number is read out and the highest wins:
+#: Horizon talks Keystone v3 and Cinder v3, and checking a rule against the v2
+#: parser would report flags missing that are perfectly real.
+_CLI_GROUP = re.compile(r"^openstack\.[a-z_]+\.v(\d+)$")
+
+
+def cli_name(command):
+    """The entry point name openstackclient registers a command under.
+
+    ``["openstack", "volume", "type", "set"]`` is ``volume_type_set``.
+    """
+    return "_".join(command[1:])
+
+
+def flags(form):
+    """Every flag a rule can put on the command line.
+
+    Spread across four keys, because a value carries one flag, a checkbox
+    carries one per side and a select carries one per option.
+    """
+    found = []
+    for field in form["fields"]:
+        for key in ("flag", "on", "off"):
+            if field.get(key):
+                found.append(field[key])
+        for option in field.get("choices", {}).values():
+            if option["flag"]:
+                found.append(option["flag"])
+    return found
+
+
+def _entry_point_groups():
+    """Entry points keyed by group, across the versions of the API.
+
+    ``entry_points()`` returned a plain mapping until 3.10 and an object with
+    ``select`` from then on. This package supports 3.9, so both are handled:
+    on the old one the crash would be an AttributeError escaping verify_cli()
+    rather than a problem it reports, which is the one outcome a checking
+    function must not have.
+    """
+    from importlib.metadata import entry_points
+
+    available = entry_points()
+    if hasattr(available, "select"):
+        return {group: available.select(group=group)
+                for group in available.groups}
+    return dict(available)
+
+
+def _cli_commands():
+    """Every openstack command name, mapped to its newest implementation."""
+    found = {}
+    for group, entries in _entry_point_groups().items():
+        match = _CLI_GROUP.match(group)
+        if not match:
+            continue
+        version = int(match.group(1))
+        for entry in entries:
+            seen = found.get(entry.name)
+            if seen is None or version > seen[0]:
+                found[entry.name] = (version, entry)
+    return {name: entry for name, (_version, entry) in found.items()}
+
+
+def _accepted(entry):
+    """What a command's parser takes: its flags, and how many positionals.
+
+    cliff builds the parser in ``get_parser``, which wants an invocation name
+    and nothing else -- no cloud, no config, no network. argparse exposes the
+    result only through ``_actions``; there is no public accessor, and an
+    action with no option strings is a positional.
+
+    Loading a command class makes osc_lib warn about one of its own modules
+    being deprecated. That is upstream talking to upstream, nothing a reader
+    of this report can act on, and left unfiltered it prints in the middle of
+    an otherwise clean run. Silenced here only, and only for the load.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        parser = entry.load()(None, None).get_parser(entry.name)
+    options = {string for action in parser._actions
+               for string in action.option_strings}
+    positionals = [action for action in parser._actions
+                   if not action.option_strings]
+    return options, len(positionals)
+
+
+def _check_cli(name, label, wanted, needs_positional, commands, problems):
+    """Confirm one command still exists and still takes what we give it."""
+    entry = commands.get(name)
+    if entry is None:
+        problems.append(
+            "%s: %r is no longer an openstack command" % (label, name))
+        return
+    try:
+        options, positionals = _accepted(entry)
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        problems.append(
+            "%s: cannot read the parser for %r (%s)" % (label, name, exc))
+        return
+    for flag in wanted:
+        if flag not in options:
+            problems.append(
+                "%s: openstack %s no longer accepts %s"
+                % (label, name.replace("_", " "), flag))
+    if needs_positional and not positionals:
+        problems.append(
+            "%s: openstack %s takes no positional argument, so the resource "
+            "the rule names has nowhere to go"
+            % (label, name.replace("_", " ")))
+
+
+def verify_cli():
+    """Check every rendered command against the real openstackclient.
+
+    The counterpart to :func:`validate`. A renamed or withdrawn flag is
+    invisible from the Horizon side: the rule still matches, still reads its
+    field and still renders, and the command it renders fails only when
+    somebody runs it.
+
+    Returns a list of human-readable problems, empty when all is well.
+    """
+    problems = []
+    commands = _cli_commands()
+    for form in FORMS:
+        # Every rule ends in a positional: a create names its subject, an
+        # edit names the resource it is editing.
+        _check_cli(cli_name(form["command"]), form["id"], flags(form),
+                   True, commands, problems)
+    for key, table in TABLES.items():
+        name = cli_name(["openstack"] + table["noun"].split() + ["delete"])
+        _check_cli(name, "table %s" % key, [], True, commands, problems)
+    return problems

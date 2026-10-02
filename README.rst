@@ -515,6 +515,14 @@ the real form. You do not need to look the field names up by hand::
     >>> rules.uncovered()['router-update']    # fields no rule mentions
     ['ha']
 
+``validate()`` needs Horizon importable. Its counterpart ``verify_cli()``
+needs ``python-openstackclient`` instead, and checks the other direction: that
+every flag the rule can emit is one the command still takes. Run it after
+adding a rule rather than checking flags by hand::
+
+    >>> rules.verify_cli()   # [] when every command and flag still exists
+    []
+
 If the declarative vocabulary cannot express a new panel, extend both
 ``rules.py`` and ``translate.py``'s ``_apply_form`` together, and add a case to
 ``tests/test_rules.py``.
@@ -534,7 +542,7 @@ Dependency-free: no npm, no jsdom, no pytest required::
 
     python3 tests/test_rules.py
 
-Four layers, in increasing order of what has to be present:
+Five layers, in increasing order of what has to be present:
 
 1. The rules are well formed and internally consistent. Needs nothing.
 2. The interpreter turns them into the expected commands, and the session store
@@ -543,6 +551,16 @@ Four layers, in increasing order of what has to be present:
    the panel shows back what it recorded. Needs Django, but not Horizon.
 4. The rules still match the Horizon forms they target. Needs a Horizon
    checkout, and is skipped with a note when one is not importable.
+5. The commands the rules render still exist, with the flags they use. Needs
+   ``python-openstackclient``, and is skipped with a note when it is absent.
+
+A rule straddles two projects, and the last two layers watch one upstream
+each. They fail differently, which is why both are worth having. Horizon drift
+stops a rule firing: the panel moves, or a field is renamed, and the recording
+quietly stops happening. CLI drift leaves the rule firing perfectly — right
+URL, right fields, right table — and rendering a command that no longer works.
+Nothing about the dashboard looks wrong; the operator finds out when they
+paste it into a shell.
 
 The panel half of layer 3 renders the real template over a real
 ``translate()`` result, because the middleware and the panel are the two ends
@@ -562,13 +580,35 @@ To include layer 4, run it with the interpreter that has Horizon on its path::
 That layer includes a test that deliberately stages a renamed field and asserts
 ``validate()`` reports it, so the safety net cannot pass vacuously.
 
+Layer 5 wants an interpreter with the CLI on it, which Horizon's does not
+have::
+
+    python3 -m venv /tmp/osc
+    /tmp/osc/bin/pip install python-openstackclient
+    /tmp/osc/bin/python tests/test_rules.py
+
+It loads each command through its openstackclient entry point, builds the
+command's argparse parser — which needs no cloud, no config and no network —
+and checks every flag the rule can emit is one the parser accepts, and that
+the command still takes the positional each rule ends with. Commands
+registered once per API version are checked against the newest, because
+Horizon talks Keystone v3 and Cinder v3 and the v2 parsers are missing flags
+the rules legitimately use.
+
 CI (``.github/workflows/ci.yml``) runs flake8, then the suite twice on each of
 Python 3.9 through 3.13 — once on a bare interpreter, which is what keeps the
 "needs nothing" claim above honest, and again with Django installed to pick up
-layer 3. It also builds a wheel and checks the template and the enabled file
-are inside it. **Layer 4 is not part of that run**: it needs a Horizon
-checkout, and pinning one Horizon version to every pull request would say
-nothing useful about upstream.
+layer 3. A separate job installs ``python-openstackclient`` for layer 5. It
+also builds a wheel and checks the template and the enabled file are inside
+it. **Layer 4 is not part of that run**: it needs a Horizon checkout, and
+pinning one Horizon version to every pull request would say nothing useful
+about upstream.
+
+Layer 5 is on every pull request rather than weekly, because the CLI is a
+release off PyPI rather than a moving checkout. Installing the current one
+answers a question worth asking per-change — do these commands work for an
+operator installing the CLI today — and it catches a flag typed wrong in a new
+rule before it merges.
 
 Layer 4 has a workflow of its own instead. ``upstream.yml`` runs weekly
 against Horizon **master**, installing Horizon under OpenStack's
@@ -583,7 +623,11 @@ somebody has upgraded and lost a recording.
 Layer 4 stages each drift it claims to catch and asserts it is reported — a
 renamed field, a moved panel, a URL name that stopped reversing, an id
 captured from the wrong path segment, a renamed table — so none of the five
-can pass vacuously.
+can pass vacuously. Layer 5 does the same for its three: a withdrawn flag, a
+renamed command, a command that stopped taking a positional. It also asserts
+it resolved a plausible number of commands and flags, because an entry point
+layout it did not expect would find nothing to check and look exactly like a
+clean run.
 
 Known limits
 ============

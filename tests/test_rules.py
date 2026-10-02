@@ -13,7 +13,7 @@
 
 """Tests for Astrolabe.
 
-Four layers, in increasing order of what they need to be present:
+Five layers, in increasing order of what they need to be present:
 
 1. The rules are well formed and internally consistent. Needs nothing.
 2. The interpreter turns them into the expected commands, and the session
@@ -24,6 +24,12 @@ Four layers, in increasing order of what they need to be present:
    no Horizon to borrow it from.
 4. The rules still match the Horizon forms they target. Needs a Horizon
    checkout; skipped with a note when one is not importable.
+5. The commands the rules render still exist, with the flags they use. Needs
+   python-openstackclient; skipped with a note when it is absent.
+
+Layers 4 and 5 watch the two upstreams a rule straddles, and they fail
+differently. Horizon drift stops a rule firing; openstackclient drift leaves
+it firing and rendering a command that no longer works.
 
 Run it directly (``python3 tests/test_rules.py``) or under pytest. To include
 layer 4, run it with the interpreter that has Horizon on its path::
@@ -31,6 +37,13 @@ layer 4, run it with the interpreter that has Horizon on its path::
     cd ../horizon
     DJANGO_SETTINGS_MODULE=openstack_dashboard.test.settings PYTHONPATH=. \\
         ./.tox/runserver/bin/python ../astrolabe/tests/test_rules.py
+
+Layer 5 wants an interpreter with the CLI on it, which Horizon's does not
+have::
+
+    python3 -m venv /tmp/osc
+    /tmp/osc/bin/pip install python-openstackclient
+    /tmp/osc/bin/python tests/test_rules.py
 """
 
 import json
@@ -221,6 +234,17 @@ class TestRuleSet(unittest.TestCase):
                     if value:
                         with self.subTest(form["id"], flag=value):
                             self.assertTrue(value.startswith("--"))
+
+    def test_the_flag_list_finds_every_flag_in_the_table(self):
+        # Layer 5 checks whatever flags() returns, so a field kind whose flag
+        # key flags() did not know about would be checked by nobody, and the
+        # layer would stay green while covering less than it claims. Derived
+        # a second way here, straight out of the raw table, so the two have
+        # to agree.
+        listed = {flag for form in rules.FORMS for flag in rules.flags(form)}
+        written = set(re.findall(r'"(--[a-z0-9-]+)"', json.dumps(rules.FORMS)))
+        self.assertEqual(sorted(written - listed), [])
+        self.assertTrue(listed)
 
     def test_tables_are_complete(self):
         for name, table in rules.TABLES.items():
@@ -1425,6 +1449,86 @@ class TestAgainstHorizon(unittest.TestCase):
         report = rules.uncovered()
         for form_id, fields in sorted(report.items()):
             print("  note: %s does not map %s" % (form_id, ", ".join(fields)))
+
+
+# ------------------------------------------------- 5. against openstackclient
+
+
+class TestAgainstTheCLI(unittest.TestCase):
+    """The commands the rules render are commands that exist.
+
+    The other half of layer 4, and the half nothing else would notice. A rule
+    can be perfectly aligned with Horizon -- right URL, right fields, right
+    table -- and render ``--no-share`` long after openstackclient stopped
+    taking it. The panel looks correct, the recording looks correct, and the
+    command fails in the operator's shell.
+    """
+
+    def setUp(self):
+        try:
+            import openstackclient  # noqa: F401
+        except ImportError:
+            self.skipTest(
+                "python-openstackclient is not on this interpreter's path; "
+                "see the module docstring for the command that includes this "
+                "layer")
+
+    def _staged(self, forms):
+        """Run verify_cli over a replacement rule table."""
+        original = rules.FORMS
+        rules.FORMS = forms
+        try:
+            return rules.verify_cli()
+        finally:
+            rules.FORMS = original
+
+    def test_every_rendered_command_still_exists(self):
+        self.assertEqual(rules.verify_cli(), [])
+
+    def test_the_check_is_looking_at_a_real_number_of_flags(self):
+        # verify_cli reports nothing when it finds nothing to check, and an
+        # entry point layout it did not expect would look exactly like a
+        # clean run. Assert it is actually resolving commands and flags.
+        self.assertGreater(len(rules._cli_commands()), 100)
+        self.assertGreater(
+            sum(len(rules.flags(form)) for form in rules.FORMS), 50)
+
+    def test_verify_cli_detects_a_withdrawn_flag(self):
+        form = dict(rules.FORMS[0])
+        form["fields"] = [rules.opt("name", "--no-such-flag")]
+        problems = self._staged([form])
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("no longer accepts --no-such-flag", problems[0])
+        self.assertEqual(rules.verify_cli(), [])
+
+    def test_verify_cli_detects_a_renamed_command(self):
+        form = dict(rules.FORMS[0], command=["openstack", "flavor", "forge"])
+        problems = self._staged([form])
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("no longer an openstack command", problems[0])
+        self.assertEqual(rules.verify_cli(), [])
+
+    def test_verify_cli_detects_a_command_that_lost_its_positional(self):
+        # Every rule ends in one: a create names its subject, an edit names
+        # the resource it is editing. A command that stopped taking one would
+        # leave that name dangling on the end, which argparse rejects.
+        # "token issue" is a real command that genuinely takes none.
+        form = dict(rules.FORMS[0], command=["openstack", "token", "issue"],
+                    fields=[rules.arg("name")])
+        problems = self._staged([form])
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("nowhere to go", problems[0])
+        self.assertEqual(rules.verify_cli(), [])
+
+    def test_the_newest_api_version_of_a_command_is_the_one_checked(self):
+        # Several commands are registered once per API version. Horizon talks
+        # Keystone v3 and Cinder v3, and the v2 parsers are missing flags the
+        # rules legitimately use, so checking against one of those would
+        # report drift that is not there.
+        for name in ("user_set", "project_set", "volume_type_set"):
+            with self.subTest(name):
+                entry = rules._cli_commands()[name]
+                self.assertRegex(entry.group, r"\.v3$")
 
 
 if __name__ == "__main__":
