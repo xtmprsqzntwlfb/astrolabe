@@ -235,6 +235,31 @@ class TestRuleSet(unittest.TestCase):
                         with self.subTest(form["id"], flag=value):
                             self.assertTrue(value.startswith("--"))
 
+    def test_only_an_edit_rule_clears_a_field(self):
+        # On a create an empty box means nothing was supplied, so there is
+        # nothing to clear and no earlier value to clear it from. A rule
+        # edits something exactly when it carries a target.
+        for form in rules.FORMS:
+            edits = any(f["kind"] == "target" for f in form["fields"])
+            for field in form["fields"]:
+                if not field.get("clearable"):
+                    continue
+                with self.subTest(form["id"], field=field["field"]):
+                    self.assertTrue(edits)
+
+    def test_a_clearable_field_holds_text_and_names_no_sentinel(self):
+        # An empty string casts to nothing as an int, and absent_when is a
+        # second, different way of spelling "not supplied" -- a field using
+        # both leaves it ambiguous which one an empty box meant.
+        for form in rules.FORMS:
+            for field in form["fields"]:
+                if not field.get("clearable"):
+                    continue
+                with self.subTest(form["id"], field=field["field"]):
+                    self.assertEqual(field["cast"], "str")
+                    self.assertIsNone(field["absentWhen"])
+                    self.assertIsNone(field["omitWhen"])
+
     def test_the_flag_list_finds_every_flag_in_the_table(self):
         # Layer 5 checks whatever flags() returns, so a field kind whose flag
         # key flags() did not know about would be checked by nobody, and the
@@ -737,6 +762,74 @@ class TestTranslate(unittest.TestCase):
             with self.subTest(url=url):
                 out = translate.translate(url, {"name": "x"})
                 self.assertTrue(out["cli"].startswith(prefix), out["cli"])
+
+    def test_emptying_a_description_on_an_edit_clears_it(self):
+        # The operator deleted the text and saved. Horizon sends "" and the
+        # description goes away; a command that left the flag off would
+        # quietly keep the old one, and a replayed script would rebuild
+        # something the operator had removed.
+        out = translate.translate("/identity/groups/g-1/update/", {
+            "name": "operators", "description": "",
+        })
+        self.assertEqual(
+            out["cli"],
+            "openstack group set --name operators --description '' g-1")
+        self.assertEqual(out["calls"][0]["body"]["group"]["description"], "")
+
+    def test_a_field_the_form_never_carried_is_not_a_clear(self):
+        # The difference this rests on: absent is not empty. A form that
+        # does not include the field at all, because the panel hid it or an
+        # older Horizon did not have it, must not read as a deletion.
+        out = translate.translate("/identity/groups/g-1/update/",
+                                  {"name": "operators"})
+        self.assertEqual(out["cli"], "openstack group set --name operators "
+                                     "g-1")
+        self.assertNotIn("description", out["calls"][0]["body"]["group"])
+
+    def test_every_clearable_field_renders_an_empty_flag(self):
+        # Applied straight to each rule, so a clearable added later cannot
+        # quietly do nothing on a panel nobody wrote a test for.
+        clearable = [(form, field) for form in rules.FORMS
+                     for field in form["fields"] if field.get("clearable")]
+        # A loop over nothing passes, and a keyword that stopped being read
+        # would look exactly like this test being happy.
+        self.assertGreaterEqual(len(clearable), 5)
+        for form, field in clearable:
+            with self.subTest(form["id"], field=field["field"]):
+                out = translate._apply_form(
+                    form, {field["field"]: ""}, {"id": "x"})
+                self.assertIn("%s ''" % field["flag"], out["cli"])
+                body = out["calls"][0]["body"][form["envelope"]]
+                self.assertEqual(body[field["api"]], "")
+
+    def test_no_value_field_speaks_when_it_was_not_submitted(self):
+        # The other half, over every rule rather than every clearable one:
+        # an empty submission must put no --flag on any command, whatever
+        # the rule says about clearing.
+        for form in rules.FORMS:
+            out = translate._apply_form(form, {}, {"id": "x"})
+            for field in form["fields"]:
+                if field["kind"] != "value":
+                    continue
+                with self.subTest(form["id"], field=field["field"]):
+                    self.assertNotIn(field["flag"], out["cli"])
+
+    def test_a_create_still_treats_an_empty_box_as_nothing_supplied(self):
+        out = translate.translate("/identity/groups/create",
+                                  {"name": "operators", "description": ""})
+        self.assertEqual(out["cli"], "openstack group create operators")
+        self.assertNotIn("description", out["calls"][0]["body"]["group"])
+
+    def test_clearing_the_primary_project_is_not_rendered(self):
+        # There is no way to say it: openstackclient has no "user unset" and
+        # no --no-project, and --project '' would go looking for a project
+        # named "". Saying nothing beats rendering a command that fails.
+        out = translate.translate("/identity/users/u-1/update/", {
+            "name": "alice", "project": "", "email": "alice@example.com",
+        })
+        self.assertNotIn("--project", out["cli"])
+        self.assertNotIn("default_project_id",
+                         out["calls"][0]["body"]["user"])
 
     def test_each_identity_edit_url_reaches_its_own_rule(self):
         """The edit side of the nesting, which is tighter than the create side.

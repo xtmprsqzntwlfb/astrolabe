@@ -51,7 +51,8 @@ IDENT = "openstack_dashboard.dashboards.identity."
 # is the exception, and reads the URL rather than the submission.
 
 
-def opt(field, flag, api=None, cast="str", omit_when=None, absent_when=None):
+def opt(field, flag, api=None, cast="str", omit_when=None, absent_when=None,
+        clearable=False):
     """A value carried by a flag: ``--ram 2048``.
 
     ``omit_when`` drops the flag for a given value but keeps it in the REST
@@ -61,11 +62,24 @@ def opt(field, flag, api=None, cast="str", omit_when=None, absent_when=None):
     ``absent_when`` names a sentinel the operator can type that means "not
     supplied", and drops the field from the command *and* the body. Horizon's
     flavor form uses ``auto`` this way.
+
+    ``clearable`` says an empty box means "remove this", which is only ever
+    true on an edit. A create and an edit submit the same empty string and
+    mean opposite things by it: nothing was supplied, against delete what is
+    there. Without this the command silently leaves the old value in place,
+    so a replayed script does not reproduce what the operator built.
+
+    Set it only where emptying the field is a thing the API actually does.
+    A blank the service would reject -- Nova will not let an aggregate's
+    availability zone be cleared once set -- is better left unrecorded and
+    written down, because a command that fails is worse than one that is
+    short. An absent field is skipped either way: it is an empty one, not a
+    missing one, that this is about.
     """
     return {
         "kind": "value", "field": field, "flag": flag,
         "api": api or field, "cast": cast, "omitWhen": omit_when,
-        "absentWhen": absent_when,
+        "absentWhen": absent_when, "clearable": clearable,
     }
 
 
@@ -221,7 +235,7 @@ FORMS = [
             # The create form calls this vol_type_description; the edit form
             # calls it description. Same field to an operator, two names to a
             # rule.
-            opt("description", "--description"),
+            opt("description", "--description", clearable=True),
             # Cinder spells the key two ways, and both are right: a create
             # takes "os-volume-type-access:is_public", an update takes a plain
             # "is_public". volume_type_update passes it on every edit, so both
@@ -465,7 +479,7 @@ FORMS = [
         # use: it names the id.
         "fields": [
             opt("name", "--name"),
-            opt("description", "--description"),
+            opt("description", "--description", clearable=True),
             boolean("enabled", "enabled", on="--enable", off="--disable"),
             target(),
         ],
@@ -502,7 +516,7 @@ FORMS = [
         # assignments made one call at a time. See Known limits.
         "fields": [
             opt("name", "--name"),
-            opt("description", "--description"),
+            opt("description", "--description", clearable=True),
             boolean("enabled", "enabled", on="--enable", off="--disable"),
             target(),
         ],
@@ -542,7 +556,7 @@ FORMS = [
         # hidden field's contents.
         "fields": [
             opt("name", "--name"),
-            opt("description", "--description"),
+            opt("description", "--description", clearable=True),
             target(),
         ],
     },
@@ -601,9 +615,14 @@ FORMS = [
         # wrong one.
         "fields": [
             opt("name", "--name"),
+            # Not clearable, unlike the two below it. Emptying the select
+            # means "no primary project", and the CLI has no way to say that:
+            # there is no "user unset" and no --no-project, while
+            # --project '' would send the CLI looking for a project named "".
+            # Rendering nothing is the honest answer. See Known limits.
             opt("project", "--project", api="default_project_id"),
-            opt("email", "--email"),
-            opt("description", "--description"),
+            opt("email", "--email", clearable=True),
+            opt("description", "--description", clearable=True),
             target(),
         ],
     },

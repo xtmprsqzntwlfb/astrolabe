@@ -143,9 +143,21 @@ def _apply_value(field, raw, parts, body):
 
     Lifted out of _apply_form, which Horizon's flake8 complexity limit will
     not hold otherwise. The two branchiest kinds live on their own.
+
+    Absent and empty are told apart here, and nowhere else: a field the form
+    never carried is skipped, while one the operator emptied is a clear if
+    the rule says so. _blank collapses the two, so this does not use it.
     """
     raw = _scalar(raw)
-    if _blank(raw):
+    if raw is None:
+        return
+    if raw == "":
+        # Only a rule that opted in acts on this: the same empty string is a
+        # deletion on an edit form and nothing at all on a create. shq
+        # renders it as '', which is what the CLI wants. See rules.opt().
+        if field["clearable"]:
+            parts += [field["flag"], shq(raw)]
+            _put(body, field["api"], "")
         return
     absent = field["absentWhen"]
     if absent is not None and str(raw) == str(absent):

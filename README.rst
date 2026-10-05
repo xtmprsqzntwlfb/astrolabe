@@ -435,13 +435,17 @@ Nothing else changes. A rule names the URL it matches, the command and
 endpoint it maps to, and the fields it carries. Seven field kinds cover
 everything so far:
 
-``opt(field, flag, api, cast, omit_when, absent_when)``
+``opt(field, flag, api, cast, omit_when, absent_when, clearable)``
     A value carried by a flag, ``--ram 2048``. ``omit_when`` drops the flag for
     a given value but keeps it in the REST body, which is how ``--swap 0``
     stays off the command line while ``swap: 0`` still reaches the API.
     ``absent_when`` names a sentinel meaning "not supplied" and drops the field
     from both — Horizon's flavor form uses ``auto`` that way, and novaclient
-    turns ``auto`` into an omitted id.
+    turns ``auto`` into an omitted id. ``clearable`` says an empty box means
+    "remove this", which is only ever true on an edit: a create and an edit
+    submit the same empty string and mean opposite things by it. Set it only
+    where emptying the field is something the API actually does, and only on
+    a rule that carries a ``target``.
 
 ``boolean(field, api, on, off)``
     A checkbox. ``on`` is the flag emitted when ticked, ``off`` when not; either
@@ -643,10 +647,16 @@ Known limits
   are not recorded at all. Of the panels Astrolabe knows about,
   ``roles_panel`` defaults to Angular and ``flavors_panel`` does not; see the
   note under *What v1 covers* for how to switch a panel back.
-* **Clearing a field on an edit form is not recorded.** An empty value is
-  skipped, which is right on a create — nothing was supplied — and wrong on an
-  edit, where emptying the description box means delete the description. The
-  recorded command leaves it as it was. Add ``--description ''`` yourself.
+* **Clearing a field is recorded where the CLI can say it, and not
+  otherwise.** Emptying a description on any edit panel comes out as
+  ``--description ''``, and so does an emptied email on *Edit User*. Three
+  fields deliberately stay quiet: a cleared **Primary Project**, because
+  openstackclient has no ``user unset`` and no ``--no-project``, and
+  ``--project ''`` would go looking for a project named ``""``; an emptied
+  **Availability Zone** on *Edit Host Aggregate*, because Nova refuses to
+  clear one once it is set; and names, which every form but the router's
+  requires anyway. For those, the recorded command leaves the old value
+  alone. A command that is short beats one that fails.
 * **Create user is deliberately incomplete in two places.** Astrolabe never
   reads the password, so the command ends up with ``--password-prompt`` and the
   ``curl`` body has no password in it at all — the CLI form asks you at run
