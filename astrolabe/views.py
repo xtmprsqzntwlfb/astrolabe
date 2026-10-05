@@ -49,6 +49,7 @@ def _decorate(entry):
     """
     shown = dict(entry)
     shown["when"] = datetime.datetime.fromtimestamp(entry.get("at") or 0)
+    shown["commands"] = translate.commands_of(entry)
     shown["curls"] = [translate.curl_for(call)
                       for call in entry.get("calls") or []]
     # Defaulted rather than read straight, because the template marks a

@@ -24,6 +24,8 @@ import functools
 import json
 import re
 
+from urllib.parse import quote
+
 from astrolabe import rules
 
 # Field names whose values are never read, let alone stored.
@@ -124,17 +126,33 @@ def _put(body, path, value):
     body[keys[-1]] = value
 
 
-def _endpoint(spec, captured):
-    """The REST path, with anything captured from the URL substituted in.
+def _endpoint(spec, captured, fields=None, item=None, creates=None):
+    """The REST path, with everything the rule can substitute filled in.
 
     An edit rule's endpoint carries the resource id -- "/networks/{id}" --
     because the id says which resource is being changed rather than what it
-    should become, so it belongs in the path and not in the body. Create
-    rules capture nothing and their endpoints pass through untouched.
+    should become, so it belongs in the path and not in the body. A follow-up
+    step can also name submitted fields, and ``{new}`` for the resource the
+    first call creates. Create rules substitute nothing and their endpoints
+    pass through untouched.
+
+    Values are percent-encoded. They come out of a form and end up inside a
+    double-quoted URL in a curl command the operator may well run, so a space
+    or a quote in one would otherwise break the command apart. ``{new}`` is
+    the exception: it is a placeholder standing in for an id Astrolabe never
+    sees, and encoding the dollar sign would stop it reading as one.
     """
     url = spec["endpoint"]
-    for name, value in captured.items():
-        url = url.replace("{%s}" % name, str(value))
+    if creates:
+        url = url.replace("{new}", creates)
+    values = dict(captured)
+    for name, value in (fields or {}).items():
+        if isinstance(value, str):
+            values[name] = value
+    if item is not None:
+        values["item"] = item
+    for name, value in values.items():
+        url = url.replace("{%s}" % name, quote(str(value), safe=""))
     return url
 
 
@@ -180,17 +198,19 @@ def _apply_boolean(field, raw, parts, body):
     _put(body, field["api"], on)
 
 
-def _apply_form(spec, fields, captured=None):
-    """Apply one form rule to a submission.
+def _render(spec, fields, captured, item=None):
+    """One command line and one REST body, from one spec.
 
-    ``captured`` holds the named groups from the rule's URL pattern, which is
-    where an edit form's resource id comes from: the form submits what the
-    resource should become, and the path says which one.
+    A spec is a rule or one of its follow-up steps: the same shape, read the
+    same way. Returns the command as a list of parts, the body, and whatever
+    the command names, which the rule uses for an entry's title.
 
     Positionals are collected and appended last regardless of where they
-    appear in the rule, because that is where the openstack CLI wants them.
+    appear in the spec, because that is where the openstack CLI wants them.
+    Among themselves they keep the order they were written in, which is the
+    only thing a two-positional command like ``aggregate add host`` has to
+    go on.
     """
-    captured = captured or {}
     parts = list(spec["command"])
     trailing = []
     body = {}
@@ -236,7 +256,10 @@ def _apply_form(spec, fields, captured=None):
             if _blank(raw):
                 continue
             trailing.append(shq(raw))
-            _put(body, field["api"], str(raw))
+            # api=None means this positional names some other resource
+            # rather than describing this one. See rules.arg().
+            if field["api"]:
+                _put(body, field["api"], str(raw))
             subject = str(raw)
 
         elif kind == "target":
@@ -249,15 +272,74 @@ def _apply_form(spec, fields, captured=None):
             trailing.append(shq(found))
             subject = str(found)
 
+        elif kind == "item":
+            # Whichever value of the step's ``per`` list this pass is on.
+            if _blank(item):
+                continue
+            trailing.append(shq(item))
+            if field["api"]:
+                _put(body, field["api"], str(item))
+
+    return parts + trailing, body, subject
+
+
+def _call(spec, body, captured, fields, item=None, creates=None):
+    """One REST call. A spec with no envelope sends no body at all."""
+    envelope = spec.get("envelope")
+    return {
+        "method": spec["method"],
+        "url": _endpoint(spec, captured, fields, item, creates),
+        "body": {envelope: body} if envelope else None,
+    }
+
+
+def _follow_up(step, fields, captured, creates):
+    """Every command a follow-up step contributes, which may be none.
+
+    ``when`` is for the calls Horizon itself only makes sometimes: a user is
+    given a role only if a project and a role were both chosen. ``per`` is
+    for the ones it makes repeatedly, once per selected value.
+    """
+    for name in step.get("when") or []:
+        if _blank(fields.get(name)):
+            return []
+    per = step.get("per")
+    items = _as_list(fields.get(per)) if per else [None]
+    produced = []
+    for one in items:
+        if per and _blank(one):
+            continue
+        parts, body, _subject = _render(step, fields, captured, item=one)
+        produced.append((" ".join(parts),
+                         _call(step, body, captured, fields, one, creates)))
+    return produced
+
+
+def _apply_form(spec, fields, captured=None):
+    """Apply one form rule to a submission.
+
+    ``captured`` holds the named groups from the rule's URL pattern, which is
+    where an edit form's resource id comes from: the form submits what the
+    resource should become, and the path says which one.
+
+    One saved form is one entry, however many calls it took. Saving the
+    aggregate workflow with three hosts selected is four commands under one
+    heading, because that is one thing the operator did.
+    """
+    captured = captured or {}
+    creates = spec.get("creates")
+    parts, body, subject = _render(spec, fields, captured)
+    commands = [" ".join(parts)]
+    calls = [_call(spec, body, captured, fields, creates=creates)]
+    for step in spec.get("then") or []:
+        for command, call in _follow_up(step, fields, captured, creates):
+            commands.append(command)
+            calls.append(call)
     return {
         "title": "%s %s" % (spec["title"], subject) if subject
                  else spec["title"],
-        "cli": " ".join(parts + trailing),
-        "calls": [{
-            "method": spec["method"],
-            "url": _endpoint(spec, captured),
-            "body": {spec["envelope"]: body},
-        }],
+        "commands": commands,
+        "calls": calls,
     }
 
 
@@ -281,8 +363,10 @@ def _apply_delete(fields):
     return {
         "title": "Delete %s%s (%d)" % (
             noun, "s" if len(ids) > 1 else "", len(ids)),
-        "cli": "openstack %s delete %s" % (
-            noun, " ".join(shq(one) for one in ids)),
+        # One command, however many ids: the CLI takes them all at once,
+        # while the API wants a request each.
+        "commands": ["openstack %s delete %s" % (
+            noun, " ".join(shq(one) for one in ids))],
         "calls": [
             {"method": "DELETE", "url": "%s/%s" % (table["path"], one),
              "body": None}
@@ -310,6 +394,21 @@ def translate(url, fields):
 
 
 # ------------------------------------------------------------------ output
+
+
+def commands_of(entry):
+    """The commands a recorded entry renders.
+
+    Entries used to hold a single ``cli`` string, before a saved form could
+    stand for more than one command. Sessions outlive a restart on the cache
+    backend, so an upgrade finds entries in that older shape and must render
+    them rather than drop them.
+    """
+    found = entry.get("commands")
+    if found:
+        return list(found)
+    one = entry.get("cli")
+    return [one] if one else []
 
 
 def curl_for(call):
@@ -345,6 +444,9 @@ def script_for(entries):
         lines.append("# %s" % entry["title"])
         if not entry.get("ok", True):
             lines.append("# NOTE: this action was rejected by the dashboard.")
-        lines.append(entry["cli"])
+        # An action that took several calls writes several lines, in the
+        # order the dashboard made them: the aggregate exists before a host
+        # is added to it.
+        lines.extend(commands_of(entry))
     lines.append("")
     return "\n".join(lines)

@@ -69,7 +69,9 @@ plain GET returning a shell script.
         </span>
       {% endif %}
     </h4>
-    <pre aria-label="{% trans "CLI" %}">{{ entry.cli }}</pre>
+    {% for command in entry.commands %}
+      <pre aria-label="{% trans "CLI" %}">{{ command }}</pre>
+    {% endfor %}
     {% for curl in entry.curls %}
       <pre aria-label="{% trans "REST" %}">{{ curl }}</pre>
     {% endfor %}
@@ -93,5 +95,12 @@ plain GET returning a shell script.
       <li><code>{{ name }}</code> &mdash; {{ example }}</li>
     {% endfor %}
   </ul>
+  {% blocktrans trimmed %}
+    Where one saved form made several API calls, a <code>$NEW_…_ID</code> in
+    a REST path stands for the id of the resource the first call created.
+    Astrolabe records what you submitted and never sees a response, so it
+    does not know that id; substitute it yourself. The commands above need
+    no such thing, because they address the new resource by name.
+  {% endblocktrans %}
 </div>
 {% endblock %}

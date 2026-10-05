@@ -60,7 +60,40 @@ from astrolabe import store  # noqa: E402
 from astrolabe import translate  # noqa: E402
 
 KINDS = {"value", "flag", "multi", "positional", "redacted",
-         "choice", "target"}
+         "choice", "target", "item"}
+
+
+def every_spec():
+    """(rule, spec) for every rule and every follow-up step it carries.
+
+    A step renders its own command and its own body, so nearly everything
+    the rule table has to be right about, a step has to be right about too.
+    Sweeping only the rules would leave the steps unchecked.
+    """
+    for form in rules.FORMS:
+        for spec in rules.specs(form):
+            yield form, spec
+
+
+def every_field():
+    """(rule, spec, field) for every field in the table, steps included."""
+    for form, spec in every_spec():
+        for field in spec["fields"]:
+            yield form, spec, field
+
+
+def cli(out):
+    """The one command an entry renders, for the rules that render one.
+
+    Most rules are one form, one command. Asserting that here rather than
+    indexing blindly means a rule that quietly grows a second command shows
+    up in the test that was written when it had one.
+    """
+    commands = out["commands"]
+    if len(commands) != 1:
+        raise AssertionError(
+            "expected one command, got %d: %r" % (len(commands), commands))
+    return commands[0]
 
 
 class Post(dict):
@@ -130,16 +163,19 @@ class TestRuleSet(unittest.TestCase):
                 self.assertIn(":", table["table"])
 
     def test_field_kinds_are_known(self):
-        for form in rules.FORMS:
-            for field in form["fields"]:
-                with self.subTest(form["id"], field=field["field"]):
-                    self.assertIn(field["kind"], KINDS)
+        for form, _spec, field in every_field():
+            with self.subTest(form["id"], field=field["field"]):
+                self.assertIn(field["kind"], KINDS)
 
     def test_each_form_has_exactly_one_trailing_argument(self):
         # The interpreter appends these last; more than one would make
         # argument order depend on rule order, which is too subtle to allow.
         # A create names its subject (positional), an edit names the resource
         # it is editing (target), and no rule does both.
+        #
+        # Follow-up steps are the exception, and have a test of their own:
+        # "aggregate add host" takes two, and which is which is the order
+        # they are written in.
         for form in rules.FORMS:
             trailing = [f for f in form["fields"]
                         if f["kind"] in ("positional", "target")]
@@ -162,29 +198,29 @@ class TestRuleSet(unittest.TestCase):
     def test_targets_carry_no_api_key(self):
         # An id says which resource is being changed, not what it should
         # become. Neutron rejects it as an attribute of the body.
-        for form in rules.FORMS:
-            for field in form["fields"]:
-                if field["kind"] != "target":
-                    continue
-                with self.subTest(form["id"]):
-                    self.assertNotIn("api", field)
+        for form, _spec, field in every_field():
+            if field["kind"] != "target":
+                continue
+            with self.subTest(form["id"]):
+                self.assertNotIn("api", field)
 
     def test_api_keys_do_not_collide(self):
-        # Redacted fields have no api key at all: they contribute nothing to
-        # the REST body, on purpose.
-        for form in rules.FORMS:
-            keys = [field["api"] for field in form["fields"]
-                    if "api" in field]
-            with self.subTest(form["id"]):
+        # Per spec rather than per rule, because a step builds a body of its
+        # own. Redacted fields and command-only positionals have no api key
+        # at all: they contribute nothing to any body, on purpose.
+        for form, spec in every_spec():
+            keys = [field["api"] for field in spec["fields"]
+                    if field.get("api")]
+            with self.subTest(form["id"], command=" ".join(spec["command"])):
                 self.assertEqual(len(keys), len(set(keys)))
 
     def test_no_api_key_is_nested_under_another(self):
         # _put walks a dotted path with setdefault, so a rule writing both
         # "gateway" and "gateway.id" would hit a string where it wanted a
         # dict and raise. Catch that here rather than on a live submission.
-        for form in rules.FORMS:
-            keys = {field["api"] for field in form["fields"]
-                    if "api" in field}
+        for form, spec in every_spec():
+            keys = {field["api"] for field in spec["fields"]
+                    if field.get("api")}
             for key in keys:
                 parents = {".".join(key.split(".")[:n])
                            for n in range(1, key.count(".") + 1)}
@@ -195,70 +231,133 @@ class TestRuleSet(unittest.TestCase):
         # Two options sharing a flag would render the same command for two
         # different bodies, which is exactly the confusion Astrolabe exists
         # to remove.
-        for form in rules.FORMS:
-            for field in form["fields"]:
-                if field["kind"] != "choice":
-                    continue
-                flags = [one["flag"] for one in field["choices"].values()
-                         if one["flag"]]
-                with self.subTest(form["id"], field=field["field"]):
-                    self.assertTrue(flags)
-                    self.assertEqual(len(flags), len(set(flags)))
+        for form, _spec, field in every_field():
+            if field["kind"] != "choice":
+                continue
+            flags = [one["flag"] for one in field["choices"].values()
+                     if one["flag"]]
+            with self.subTest(form["id"], field=field["field"]):
+                self.assertTrue(flags)
+                self.assertEqual(len(flags), len(set(flags)))
 
     def test_redacted_fields_carry_no_api_key(self):
-        for form in rules.FORMS:
-            for field in form["fields"]:
-                if field["kind"] != "redacted":
-                    continue
-                with self.subTest(form["id"], field=field["field"]):
-                    self.assertNotIn("api", field)
-                    # The whole point is that the name is one read_fields
-                    # refuses to read.
-                    self.assertTrue(translate.is_secret(field["field"]))
+        for form, _spec, field in every_field():
+            if field["kind"] != "redacted":
+                continue
+            with self.subTest(form["id"], field=field["field"]):
+                self.assertNotIn("api", field)
+                # The whole point is that the name is one read_fields
+                # refuses to read.
+                self.assertTrue(translate.is_secret(field["field"]))
 
     def test_booleans_emit_at_least_one_flag(self):
         # A boolean with neither an on nor an off flag would silently affect
         # the REST body while leaving the command line wrong.
-        for form in rules.FORMS:
-            for field in form["fields"]:
-                if field["kind"] != "flag":
-                    continue
-                with self.subTest(form["id"], field=field["field"]):
-                    self.assertTrue(field["on"] or field["off"])
+        for form, _spec, field in every_field():
+            if field["kind"] != "flag":
+                continue
+            with self.subTest(form["id"], field=field["field"]):
+                self.assertTrue(field["on"] or field["off"])
 
     def test_flags_look_like_flags(self):
-        for form in rules.FORMS:
-            for field in form["fields"]:
-                for key in ("flag", "on", "off"):
-                    value = field.get(key)
-                    if value:
-                        with self.subTest(form["id"], flag=value):
-                            self.assertTrue(value.startswith("--"))
+        for form, _spec, field in every_field():
+            for key in ("flag", "on", "off"):
+                value = field.get(key)
+                if value:
+                    with self.subTest(form["id"], flag=value):
+                        self.assertTrue(value.startswith("--"))
 
     def test_only_an_edit_rule_clears_a_field(self):
         # On a create an empty box means nothing was supplied, so there is
         # nothing to clear and no earlier value to clear it from. A rule
-        # edits something exactly when it carries a target.
-        for form in rules.FORMS:
+        # edits something exactly when it carries a target, and a follow-up
+        # step never clears anything: it is a call Horizon made, not a field
+        # the operator emptied.
+        for form, spec, field in every_field():
+            if not field.get("clearable"):
+                continue
             edits = any(f["kind"] == "target" for f in form["fields"])
-            for field in form["fields"]:
-                if not field.get("clearable"):
-                    continue
-                with self.subTest(form["id"], field=field["field"]):
-                    self.assertTrue(edits)
+            with self.subTest(form["id"], field=field["field"]):
+                self.assertTrue(edits)
+                self.assertIs(spec, form)
 
     def test_a_clearable_field_holds_text_and_names_no_sentinel(self):
         # An empty string casts to nothing as an int, and absent_when is a
         # second, different way of spelling "not supplied" -- a field using
         # both leaves it ambiguous which one an empty box meant.
+        for form, _spec, field in every_field():
+            if not field.get("clearable"):
+                continue
+            with self.subTest(form["id"], field=field["field"]):
+                self.assertEqual(field["cast"], "str")
+                self.assertIsNone(field["absentWhen"])
+                self.assertIsNone(field["omitWhen"])
+
+    def test_every_follow_up_step_is_complete(self):
+        # A step is a rule minus what places it, so it needs the same keys
+        # bar those. envelope may be None, which is how a rule says the call
+        # carries no body at all.
+        steps = [(form, spec) for form, spec in every_spec()
+                 if spec is not form]
+        self.assertTrue(steps, "nothing here exercises follow-up steps")
+        for form, step in steps:
+            with self.subTest(form["id"],
+                              command=" ".join(step["command"])):
+                for key in ("method", "endpoint", "envelope", "command",
+                            "fields"):
+                    self.assertIn(key, step)
+                self.assertTrue(step["fields"])
+                self.assertTrue(step["command"])
+                # And none of what places a rule, which would read as though
+                # a step could be matched on its own. It cannot.
+                for key in ("url", "routes", "title", "id"):
+                    self.assertNotIn(key, step)
+
+    def test_a_step_ends_its_command_with_something(self):
+        # Unlike a rule a step may take more than one trailing argument --
+        # "aggregate add host" takes the aggregate and the host -- but it
+        # must take at least one, or the command names no resource.
+        for form, spec in every_spec():
+            if spec is form:
+                continue
+            with self.subTest(form["id"],
+                              command=" ".join(spec["command"])):
+                self.assertTrue(rules.takes_positional(spec))
+
+    def test_a_step_naming_a_new_id_has_one_to_name(self):
+        # {new} resolves from the rule's creates. Without it the endpoint
+        # would render with a literal "{new}" still in it, which looks like
+        # a value rather than like the gap it is.
+        for form, spec in every_spec():
+            needs = "{new}" in spec["endpoint"]
+            with self.subTest(form["id"], endpoint=spec["endpoint"]):
+                if needs:
+                    self.assertTrue(form.get("creates"))
+                    self.assertTrue(form["creates"].startswith("$NEW_"))
+
+    def test_creates_is_only_on_rules_that_follow_up(self):
+        # It exists to be substituted into a later call. A rule making one
+        # call has nothing to substitute it into, and declaring it there
+        # would be a promise the panel footer could not keep.
         for form in rules.FORMS:
-            for field in form["fields"]:
-                if not field.get("clearable"):
-                    continue
-                with self.subTest(form["id"], field=field["field"]):
-                    self.assertEqual(field["cast"], "str")
-                    self.assertIsNone(field["absentWhen"])
-                    self.assertIsNone(field["omitWhen"])
+            if not form.get("creates"):
+                continue
+            with self.subTest(form["id"]):
+                self.assertTrue(form.get("then"))
+                self.assertTrue(any("{new}" in step["endpoint"]
+                                    for step in form["then"]))
+
+    def test_a_repeating_step_names_the_form_its_list_lives_on(self):
+        # per names a field built at runtime, which base_fields cannot
+        # confirm. validate() re-derives it from the action class instead,
+        # and needs to be told which class that is.
+        for form, spec in every_spec():
+            if not spec.get("per"):
+                continue
+            with self.subTest(form["id"], per=spec["per"]):
+                self.assertIn(":", spec.get("form") or "")
+                self.assertTrue(any(field["kind"] == "item"
+                                    for field in spec["fields"]))
 
     def test_the_flag_list_finds_every_flag_in_the_table(self):
         # Layer 5 checks whatever flags() returns, so a field kind whose flag
@@ -266,7 +365,8 @@ class TestRuleSet(unittest.TestCase):
         # layer would stay green while covering less than it claims. Derived
         # a second way here, straight out of the raw table, so the two have
         # to agree.
-        listed = {flag for form in rules.FORMS for flag in rules.flags(form)}
+        listed = {flag for form in rules.FORMS for spec in rules.specs(form)
+                  for flag in rules.flags(spec)}
         written = set(re.findall(r'"(--[a-z0-9-]+)"', json.dumps(rules.FORMS)))
         self.assertEqual(sorted(written - listed), [])
         self.assertTrue(listed)
@@ -336,7 +436,7 @@ class TestTranslate(unittest.TestCase):
             "swap_mb": "512",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack flavor create --id small-1 --vcpus 1 --ram 2048 "
             "--disk 20 --ephemeral 5 --swap 512 m1.small")
         self.assertEqual(out["calls"][0]["body"]["flavor"], {
@@ -354,7 +454,7 @@ class TestTranslate(unittest.TestCase):
             "name": "m1.small", "flavor_id": "auto", "vcpus": "1",
             "memory_mb": "2048", "disk_gb": "20",
         })
-        self.assertNotIn("--id", out["cli"])
+        self.assertNotIn("--id", cli(out))
         self.assertNotIn("id", out["calls"][0]["body"]["flavor"])
 
     def test_flavor_create_omits_zero_ephemeral_and_swap(self):
@@ -362,8 +462,8 @@ class TestTranslate(unittest.TestCase):
             "name": "tiny", "flavor_id": "auto", "vcpus": "1",
             "memory_mb": "512", "disk_gb": "1", "eph_gb": "0", "swap_mb": "0",
         })
-        self.assertNotIn("--ephemeral", out["cli"])
-        self.assertNotIn("--swap", out["cli"])
+        self.assertNotIn("--ephemeral", cli(out))
+        self.assertNotIn("--swap", cli(out))
         # Zero is still meaningful in the API body, unlike on the command line.
         body = out["calls"][0]["body"]["flavor"]
         self.assertEqual(body["OS-FLV-EXT-DATA:ephemeral"], 0)
@@ -374,8 +474,8 @@ class TestTranslate(unittest.TestCase):
             "name": "it's big", "flavor_id": "", "vcpus": "8",
             "memory_mb": "16384", "disk_gb": "100",
         })
-        self.assertTrue(out["cli"].endswith("'it'\\''s big'"), out["cli"])
-        self.assertNotIn("--id", out["cli"])
+        self.assertTrue(cli(out).endswith("'it'\\''s big'"), cli(out))
+        self.assertNotIn("--id", cli(out))
         self.assertNotIn("id", out["calls"][0]["body"]["flavor"])
 
     def test_volume_type_defaults_to_public(self):
@@ -384,7 +484,7 @@ class TestTranslate(unittest.TestCase):
             "is_public": "on",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack volume type create --description 'Fast disks' ssd")
         self.assertIs(
             out["calls"][0]["body"]["volume_type"][
@@ -393,7 +493,7 @@ class TestTranslate(unittest.TestCase):
     def test_volume_type_without_the_checkbox_is_private(self):
         out = translate.translate("/admin/volume_types/create_type",
                                   {"name": "ssd"})
-        self.assertEqual(out["cli"],
+        self.assertEqual(cli(out),
                          "openstack volume type create --private ssd")
         self.assertIs(
             out["calls"][0]["body"]["volume_type"][
@@ -407,7 +507,7 @@ class TestTranslate(unittest.TestCase):
             "name": "ssd", "description": "Fast disks", "is_public": "on",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack volume type set --name ssd --description 'Fast disks' "
             "--public vt-1")
         body = out["calls"][0]["body"]["volume_type"]
@@ -429,7 +529,7 @@ class TestTranslate(unittest.TestCase):
             "external": "on", "az_hints": ["nova", "az2"],
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack network create --project abc123 "
             "--provider-network-type vlan "
             "--provider-physical-network physnet1 --provider-segment 101 "
@@ -447,7 +547,7 @@ class TestTranslate(unittest.TestCase):
                 "external": "on",
             })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack network set --name renamed --enable --share "
             "--external 9f2c7b1e-aaaa-bbbb-cccc-0123456789ab")
         self.assertEqual(out["title"],
@@ -471,7 +571,7 @@ class TestTranslate(unittest.TestCase):
         out = translate.translate("/admin/networks/net-7/update/",
                                   {"name": "quiet"})
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack network set --name quiet --disable --no-share "
             "--internal net-7")
         body = out["calls"][0]["body"]["network"]
@@ -492,15 +592,15 @@ class TestTranslate(unittest.TestCase):
         created = translate.translate("/admin/networks/create/",
                                       {"name": "n1", "admin_state": "on"})
         self.assertEqual(created["calls"][0]["method"], "POST")
-        self.assertIn("network create", created["cli"])
+        self.assertIn("network create", cli(created))
 
     def test_unchecked_admin_state_becomes_disable(self):
         out = translate.translate("/admin/networks/create/", {
             "name": "down", "tenant_id": "abc123", "network_type": "geneve",
         })
-        self.assertIn("--disable", out["cli"])
-        self.assertNotIn("--share", out["cli"])
-        self.assertNotIn("--external", out["cli"])
+        self.assertIn("--disable", cli(out))
+        self.assertNotIn("--share", cli(out))
+        self.assertNotIn("--external", cli(out))
         body = out["calls"][0]["body"]["network"]
         self.assertIs(body["admin_state_up"], False)
         self.assertNotIn("availability_zone_hints", body)
@@ -510,21 +610,61 @@ class TestTranslate(unittest.TestCase):
             "name": "gpu-nodes", "availability_zone": "az-gpu",
         })
         self.assertEqual(
-            out["cli"], "openstack aggregate create --zone az-gpu gpu-nodes")
+            cli(out), "openstack aggregate create --zone az-gpu gpu-nodes")
         self.assertEqual(out["calls"][0]["body"]["aggregate"],
                          {"availability_zone": "az-gpu", "name": "gpu-nodes"})
 
     def test_an_aggregate_without_a_zone_omits_the_flag(self):
         out = translate.translate("/admin/aggregates/create/",
                                   {"name": "spare"})
-        self.assertEqual(out["cli"], "openstack aggregate create spare")
+        self.assertEqual(cli(out), "openstack aggregate create spare")
+
+    def test_an_aggregate_with_hosts_is_one_entry_of_several_commands(self):
+        # One saved form, four calls, one entry: that is one thing the
+        # operator did, and splitting it would lose the order they happen in.
+        out = translate.translate("/admin/aggregates/create/", {
+            "name": "gpu-nodes", "availability_zone": "az-gpu",
+            "add_host_to_aggregate_role_member": ["cmp1", "cmp2", "cmp3"],
+        })
+        self.assertEqual(out["commands"], [
+            "openstack aggregate create --zone az-gpu gpu-nodes",
+            "openstack aggregate add host gpu-nodes cmp1",
+            "openstack aggregate add host gpu-nodes cmp2",
+            "openstack aggregate add host gpu-nodes cmp3",
+        ])
+        self.assertEqual(out["title"], "Create host aggregate gpu-nodes")
+        self.assertEqual(len(out["calls"]), 4)
+
+    def test_the_host_calls_name_an_id_astrolabe_cannot_know(self):
+        # Nova wants the aggregate's id, which only exists once the first
+        # call has returned, and Astrolabe never sees a response. The
+        # command gets by on the name; the REST path says so instead of
+        # inventing something.
+        out = translate.translate("/admin/aggregates/create/", {
+            "name": "gpu-nodes",
+            "add_host_to_aggregate_role_member": ["cmp1"],
+        })
+        self.assertEqual(out["calls"][1], {
+            "method": "POST",
+            "url": "$OS_COMPUTE_API/os-aggregates/$NEW_AGGREGATE_ID/action",
+            "body": {"add_host": {"host": "cmp1"}},
+        })
+        # The command half needs no such thing, which is the point of it.
+        self.assertNotIn("$NEW_", out["commands"][1])
+
+    def test_an_aggregate_with_no_hosts_is_one_command_as_before(self):
+        out = translate.translate("/admin/aggregates/create/", {
+            "name": "spare", "add_host_to_aggregate_role_member": [],
+        })
+        self.assertEqual(cli(out), "openstack aggregate create spare")
+        self.assertEqual(len(out["calls"]), 1)
 
     def test_aggregate_update_names_the_aggregate_from_the_url(self):
         out = translate.translate("/admin/aggregates/7/update/", {
             "name": "gpu-nodes", "availability_zone": "az-gpu",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack aggregate set --name gpu-nodes --zone az-gpu 7")
         self.assertEqual(out["calls"][0]["url"],
                          "$OS_COMPUTE_API/os-aggregates/7")
@@ -538,7 +678,7 @@ class TestTranslate(unittest.TestCase):
         out = translate.translate("/admin/aggregates/", {
             "action": "host_aggregates__delete__7",
         })
-        self.assertEqual(out["cli"], "openstack aggregate delete 7")
+        self.assertEqual(cli(out), "openstack aggregate delete 7")
         self.assertTrue(out["calls"][0]["url"].endswith("/os-aggregates/7"))
 
     def test_router_create_maps_every_field_it_covers(self):
@@ -548,7 +688,7 @@ class TestTranslate(unittest.TestCase):
             "ha": "enabled", "az_hints": ["az1", "az2"],
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack router create --project p-9 "
             "--external-gateway net-ext --distributed --ha "
             "--availability-zone-hint az1 --availability-zone-hint az2 "
@@ -571,7 +711,7 @@ class TestTranslate(unittest.TestCase):
             "ha": "server_default", "admin_state_up": "on",
         })
         self.assertEqual(
-            out["cli"], "openstack router create plain")
+            cli(out), "openstack router create plain")
         body = out["calls"][0]["body"]["router"]
         self.assertNotIn("distributed", body)
         self.assertNotIn("ha", body)
@@ -584,7 +724,7 @@ class TestTranslate(unittest.TestCase):
             "admin_state_up": "on",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack router create --centralized --no-ha legacy")
         body = out["calls"][0]["body"]["router"]
         self.assertIs(body["distributed"], False)
@@ -596,7 +736,7 @@ class TestTranslate(unittest.TestCase):
             "mode": "server_default", "ha": "server_default",
         })
         self.assertEqual(
-            out["cli"], "openstack router create --disable internal")
+            cli(out), "openstack router create --disable internal")
         self.assertNotIn("external_gateway_info",
                          out["calls"][0]["body"]["router"])
 
@@ -607,7 +747,7 @@ class TestTranslate(unittest.TestCase):
         for url in ("/admin/routers/create/", "/project/routers/create/"):
             with self.subTest(url):
                 out = translate.translate(url, {"name": "r1"})
-                self.assertTrue(out["cli"].startswith(
+                self.assertTrue(cli(out).startswith(
                     "openstack router create"))
 
     def test_a_project_side_router_carries_no_project_flag(self):
@@ -616,7 +756,7 @@ class TestTranslate(unittest.TestCase):
         out = translate.translate("/project/routers/create/", {
             "name": "mine", "admin_state_up": "on",
         })
-        self.assertEqual(out["cli"], "openstack router create mine")
+        self.assertEqual(cli(out), "openstack router create mine")
         self.assertNotIn("tenant_id", out["calls"][0]["body"]["router"])
 
     def test_router_update_is_recorded_from_either_dashboard(self):
@@ -626,7 +766,7 @@ class TestTranslate(unittest.TestCase):
                     "name": "edge", "admin_state": "on", "mode": "distributed",
                 })
                 self.assertEqual(
-                    out["cli"],
+                    cli(out),
                     "openstack router set --name edge --enable --distributed "
                     "r-1")
                 self.assertEqual(out["calls"][0]["url"],
@@ -638,7 +778,7 @@ class TestTranslate(unittest.TestCase):
         # router edit an operator makes.
         out = translate.translate("/admin/routers/r-1/update",
                                   {"name": "edge", "ha": "on"})
-        self.assertNotIn("ha", out["cli"])
+        self.assertNotIn("ha", cli(out))
         self.assertNotIn("ha", out["calls"][0]["body"]["router"])
 
     def test_a_router_edit_without_dvr_leaves_the_mode_alone(self):
@@ -646,7 +786,7 @@ class TestTranslate(unittest.TestCase):
         # no "distributed" key. An absent select must read the same way.
         out = translate.translate("/admin/routers/r-1/update",
                                   {"name": "edge", "admin_state": "on"})
-        self.assertEqual(out["cli"],
+        self.assertEqual(cli(out),
                          "openstack router set --name edge --enable r-1")
         self.assertNotIn("distributed", out["calls"][0]["body"]["router"])
 
@@ -655,7 +795,7 @@ class TestTranslate(unittest.TestCase):
             "action": "routers__delete",
             "object_ids": ["r-1", "r-2"],
         })
-        self.assertEqual(out["cli"], "openstack router delete r-1 r-2")
+        self.assertEqual(cli(out), "openstack router delete r-1 r-2")
         self.assertEqual(
             [call["url"].rsplit("/", 1)[-1] for call in out["calls"]],
             ["r-1", "r-2"])
@@ -666,7 +806,7 @@ class TestTranslate(unittest.TestCase):
             "description": "R&D", "enabled": "on",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack project create --domain d-1 --description 'R&D' "
             "engineering")
         body = out["calls"][0]["body"]["project"]
@@ -678,8 +818,8 @@ class TestTranslate(unittest.TestCase):
         out = translate.translate("/identity/create",
                                   {"name": "dormant", "domain_id": "d-1"})
         self.assertEqual(
-            out["cli"], "openstack project create --domain d-1 --disable "
-                        "dormant")
+            cli(out),
+            "openstack project create --domain d-1 --disable dormant")
         self.assertIs(out["calls"][0]["body"]["project"]["enabled"], False)
 
     def test_domain_create_needs_no_domain_of_its_own(self):
@@ -688,7 +828,7 @@ class TestTranslate(unittest.TestCase):
             "enabled": "on",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack domain create --description 'Third parties' partners")
         self.assertEqual(out["calls"][0]["body"]["domain"]["name"], "partners")
 
@@ -697,12 +837,12 @@ class TestTranslate(unittest.TestCase):
             "name": "operators", "description": "On call",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack group create --description 'On call' operators")
 
     def test_role_create_is_nothing_but_a_name(self):
         out = translate.translate("/identity/roles/create", {"name": "auditor"})
-        self.assertEqual(out["cli"], "openstack role create auditor")
+        self.assertEqual(cli(out), "openstack role create auditor")
         self.assertEqual(out["calls"][0]["body"]["role"], {"name": "auditor"})
 
     def test_user_create_prompts_for_the_password_it_never_read(self):
@@ -712,7 +852,7 @@ class TestTranslate(unittest.TestCase):
             "enabled": "on",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack user create --domain d-1 --project p-1 "
             "--email alice@example.com --description SRE --password-prompt "
             "alice")
@@ -720,6 +860,43 @@ class TestTranslate(unittest.TestCase):
         self.assertEqual(body["default_project_id"], "p-1")
         self.assertIs(body["enabled"], True)
         self.assertNotIn("password", body)
+
+    def test_a_user_given_a_role_gets_the_second_command_too(self):
+        out = translate.translate("/identity/users/create/", {
+            "name": "alice", "domain_id": "d-1", "project": "p-1",
+            "role_id": "r-9", "enabled": "on",
+        })
+        self.assertEqual(out["commands"][1],
+                         "openstack role add --user alice --project p-1 r-9")
+        self.assertEqual(out["calls"][1], {
+            "method": "PUT",
+            "url": "$OS_IDENTITY_API/projects/p-1/users/$NEW_USER_ID"
+                   "/roles/r-9",
+            # Keystone grants a role with an empty PUT. A body key with
+            # nothing in it would be a different request.
+            "body": None,
+        })
+
+    def test_the_role_grant_appears_only_when_horizon_would_make_it(self):
+        # Horizon calls add_tenant_user_role only if a project and a role
+        # were both chosen. Either on its own means nothing, and a command
+        # for it would be a call the dashboard never made.
+        for submitted in ({"project": "p-1"}, {"role_id": "r-9"}, {}):
+            with self.subTest(**submitted):
+                out = translate.translate(
+                    "/identity/users/create/",
+                    dict({"name": "alice"}, **submitted))
+                self.assertEqual(len(out["commands"]), 1, out["commands"])
+                self.assertNotIn("role add", " ".join(out["commands"]))
+
+    def test_a_role_grant_curl_carries_no_body(self):
+        out = translate.translate("/identity/users/create/", {
+            "name": "alice", "project": "p-1", "role_id": "r-9",
+        })
+        curl = translate.curl_for(out["calls"][1])
+        self.assertIn("-X PUT", curl)
+        self.assertNotIn(" -d ", curl)
+        self.assertFalse(curl.rstrip().endswith("\\"), curl)
 
     def test_a_submitted_password_survives_nowhere(self):
         """The end-to-end path, not just the rule: read_fields then translate.
@@ -734,16 +911,16 @@ class TestTranslate(unittest.TestCase):
                 "password": ["hunter2"], "confirm_password": ["hunter2"],
                 "csrfmiddlewaretoken": ["abcdef"],
             }))
-        rendered = out["cli"] + json.dumps(out["calls"])
+        rendered = cli(out) + json.dumps(out["calls"])
         self.assertNotIn("hunter2", rendered)
         self.assertNotIn("abcdef", rendered)
-        self.assertIn("--password-prompt", out["cli"])
+        self.assertIn("--password-prompt", cli(out))
 
     def test_the_prompt_flag_appears_even_with_nothing_submitted(self):
         # A dropped field and an empty one are indistinguishable here, so the
         # flag has to be unconditional or it would be unreliable.
         out = translate.translate("/identity/users/create/", {"name": "bob"})
-        self.assertIn("--password-prompt", out["cli"])
+        self.assertIn("--password-prompt", cli(out))
 
     def test_each_identity_url_reaches_its_own_rule(self):
         """The identity paths nest, so the patterns must not poach.
@@ -761,7 +938,7 @@ class TestTranslate(unittest.TestCase):
         for url, prefix in expected.items():
             with self.subTest(url=url):
                 out = translate.translate(url, {"name": "x"})
-                self.assertTrue(out["cli"].startswith(prefix), out["cli"])
+                self.assertTrue(cli(out).startswith(prefix), cli(out))
 
     def test_emptying_a_description_on_an_edit_clears_it(self):
         # The operator deleted the text and saved. Horizon sends "" and the
@@ -772,7 +949,7 @@ class TestTranslate(unittest.TestCase):
             "name": "operators", "description": "",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack group set --name operators --description '' g-1")
         self.assertEqual(out["calls"][0]["body"]["group"]["description"], "")
 
@@ -782,8 +959,8 @@ class TestTranslate(unittest.TestCase):
         # older Horizon did not have it, must not read as a deletion.
         out = translate.translate("/identity/groups/g-1/update/",
                                   {"name": "operators"})
-        self.assertEqual(out["cli"], "openstack group set --name operators "
-                                     "g-1")
+        self.assertEqual(cli(out),
+                         "openstack group set --name operators g-1")
         self.assertNotIn("description", out["calls"][0]["body"]["group"])
 
     def test_every_clearable_field_renders_an_empty_flag(self):
@@ -798,26 +975,29 @@ class TestTranslate(unittest.TestCase):
             with self.subTest(form["id"], field=field["field"]):
                 out = translate._apply_form(
                     form, {field["field"]: ""}, {"id": "x"})
-                self.assertIn("%s ''" % field["flag"], out["cli"])
+                self.assertIn("%s ''" % field["flag"], cli(out))
                 body = out["calls"][0]["body"][form["envelope"]]
                 self.assertEqual(body[field["api"]], "")
 
     def test_no_value_field_speaks_when_it_was_not_submitted(self):
         # The other half, over every rule rather than every clearable one:
         # an empty submission must put no --flag on any command, whatever
-        # the rule says about clearing.
+        # the rule says about clearing. Follow-up steps included, which is
+        # also a check that a submission naming nothing produces none.
         for form in rules.FORMS:
             out = translate._apply_form(form, {}, {"id": "x"})
-            for field in form["fields"]:
-                if field["kind"] != "value":
-                    continue
-                with self.subTest(form["id"], field=field["field"]):
-                    self.assertNotIn(field["flag"], out["cli"])
+            rendered = " ".join(out["commands"])
+            for spec in rules.specs(form):
+                for field in spec["fields"]:
+                    if field["kind"] != "value":
+                        continue
+                    with self.subTest(form["id"], field=field["field"]):
+                        self.assertNotIn(field["flag"], rendered)
 
     def test_a_create_still_treats_an_empty_box_as_nothing_supplied(self):
         out = translate.translate("/identity/groups/create",
                                   {"name": "operators", "description": ""})
-        self.assertEqual(out["cli"], "openstack group create operators")
+        self.assertEqual(cli(out), "openstack group create operators")
         self.assertNotIn("description", out["calls"][0]["body"]["group"])
 
     def test_clearing_the_primary_project_is_not_rendered(self):
@@ -827,7 +1007,7 @@ class TestTranslate(unittest.TestCase):
         out = translate.translate("/identity/users/u-1/update/", {
             "name": "alice", "project": "", "email": "alice@example.com",
         })
-        self.assertNotIn("--project", out["cli"])
+        self.assertNotIn("--project", cli(out))
         self.assertNotIn("default_project_id",
                          out["calls"][0]["body"]["user"])
 
@@ -848,9 +1028,9 @@ class TestTranslate(unittest.TestCase):
         for url, prefix in expected.items():
             with self.subTest(url=url):
                 out = translate.translate(url, {"name": "renamed"})
-                self.assertTrue(out["cli"].startswith(prefix), out["cli"])
+                self.assertTrue(cli(out).startswith(prefix), cli(out))
                 # The id is the last word, and it is the one in the path.
-                self.assertEqual(out["cli"].rsplit(" ", 1)[-1],
+                self.assertEqual(cli(out).rsplit(" ", 1)[-1],
                                  url.split("/")[-3])
 
     def test_a_project_edit_turns_both_sides_of_the_enabled_box(self):
@@ -858,13 +1038,13 @@ class TestTranslate(unittest.TestCase):
             "name": "engineering", "description": "R&D", "enabled": "on",
         })
         self.assertEqual(
-            enabled["cli"],
+            cli(enabled),
             "openstack project set --name engineering --description 'R&D' "
             "--enable p-1")
         self.assertEqual(enabled["calls"][0]["method"], "PATCH")
         disabled = translate.translate("/identity/p-1/update/",
                                        {"name": "engineering"})
-        self.assertIn("--disable", disabled["cli"])
+        self.assertIn("--disable", cli(disabled))
         self.assertIs(disabled["calls"][0]["body"]["project"]["enabled"],
                       False)
 
@@ -875,7 +1055,7 @@ class TestTranslate(unittest.TestCase):
             "name": "engineering", "domain_id": "d-1", "domain_name": "Default",
             "enabled": "on",
         })
-        self.assertNotIn("--domain", out["cli"])
+        self.assertNotIn("--domain", cli(out))
         self.assertNotIn("domain_id", out["calls"][0]["body"]["project"])
 
     def test_a_group_edit_takes_the_id_from_the_path_not_the_hidden_field(self):
@@ -885,7 +1065,7 @@ class TestTranslate(unittest.TestCase):
             "description": "On call",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack group set --name operators --description 'On call' g-1")
         self.assertEqual(out["calls"][0]["url"], "$OS_IDENTITY_API/groups/g-1")
         self.assertNotIn("g-stale", json.dumps(out))
@@ -897,7 +1077,7 @@ class TestTranslate(unittest.TestCase):
             "domain_id": "d-1", "domain_name": "Default",
         })
         self.assertEqual(
-            out["cli"],
+            cli(out),
             "openstack user set --name alice --project p-2 "
             "--email alice@example.com --description SRE u-1")
         body = out["calls"][0]["body"]["user"]
@@ -916,14 +1096,14 @@ class TestTranslate(unittest.TestCase):
         out = translate.translate("/identity/", {
             "action": "tenants__delete", "object_ids": ["p1", "p2"],
         })
-        self.assertEqual(out["cli"], "openstack project delete p1 p2")
+        self.assertEqual(cli(out), "openstack project delete p1 p2")
         self.assertTrue(out["calls"][0]["url"].endswith("/projects/p1"))
         self.assertEqual(out["title"], "Delete projects (2)")
 
     def test_row_delete_uses_the_id_in_the_action_field(self):
         out = translate.translate("/admin/flavors/",
                                   {"action": "flavors__delete__abc-1"})
-        self.assertEqual(out["cli"], "openstack flavor delete abc-1")
+        self.assertEqual(cli(out), "openstack flavor delete abc-1")
         self.assertEqual(len(out["calls"]), 1)
         self.assertEqual(out["calls"][0]["method"], "DELETE")
         self.assertTrue(out["calls"][0]["url"].endswith("/flavors/abc-1"))
@@ -932,7 +1112,7 @@ class TestTranslate(unittest.TestCase):
         out = translate.translate("/admin/networks/", {
             "action": "networks__delete", "object_ids": ["n1", "n2"],
         })
-        self.assertEqual(out["cli"], "openstack network delete n1 n2")
+        self.assertEqual(cli(out), "openstack network delete n1 n2")
         self.assertEqual(len(out["calls"]), 2)
         self.assertIn("(2)", out["title"])
 
@@ -966,6 +1146,18 @@ class TestRendering(unittest.TestCase):
         self.assertIn('$OS_COMPUTE_API/flavors', curl)
         self.assertIn('-d \'{"flavor"', curl)
 
+    def test_a_value_substituted_into_a_url_is_percent_encoded(self):
+        # The url goes inside a double-quoted curl argument. A quote or a
+        # space in a submitted value would otherwise end the argument early
+        # and turn the rest of the path into separate words.
+        out = translate.translate("/identity/users/create/", {
+            "name": "alice", "project": 'a b"c', "role_id": "r-9",
+        })
+        url = out["calls"][1]["url"]
+        self.assertIn("/projects/a%20b%22c/", url)
+        curl = translate.curl_for(out["calls"][1])
+        self.assertEqual(curl.count('"'), 4, curl)
+
     def test_curl_omits_a_body_for_deletes(self):
         out = translate.translate("/admin/flavors/",
                                   {"action": "flavors__delete__z"})
@@ -978,16 +1170,41 @@ class TestRendering(unittest.TestCase):
         # The panel shows newest first; a script has to run in the order the
         # operator worked, or dependent resources come out backwards.
         entries = [
-            {"title": "Create network b", "cli": "openstack network create b",
-             "ok": False},
-            {"title": "Create network a", "cli": "openstack network create a",
-             "ok": True},
+            {"title": "Create network b",
+             "commands": ["openstack network create b"], "ok": False},
+            {"title": "Create network a",
+             "commands": ["openstack network create a"], "ok": True},
         ]
         text = translate.script_for(entries)
         self.assertTrue(text.startswith("#!/bin/sh"))
         self.assertLess(text.index("create a"), text.index("create b"))
         self.assertIn("# NOTE: this action was rejected", text)
         self.assertEqual(text.count("# NOTE:"), 1)
+
+    def test_a_multi_command_action_writes_every_line_in_order(self):
+        # The aggregate has to exist before a host goes into it, so these
+        # go out in the order the dashboard made them, under one heading.
+        entry = translate.translate("/admin/aggregates/create/", {
+            "name": "gpu", "add_host_to_aggregate_role_member": ["c1", "c2"],
+        })
+        text = translate.script_for([entry])
+        self.assertEqual(text.count("# Create host aggregate gpu"), 1)
+        self.assertLess(text.index("aggregate create"),
+                        text.index("add host gpu c1"))
+        self.assertLess(text.index("add host gpu c1"),
+                        text.index("add host gpu c2"))
+
+    def test_a_script_still_renders_an_entry_from_an_older_astrolabe(self):
+        # Entries used to hold a single "cli" string. A session on the cache
+        # backend outlives a restart, so an upgrade finds them and must
+        # write them out rather than skip the line and leave a bare comment.
+        text = translate.script_for([
+            {"title": "Create network a", "cli": "openstack network create a"},
+        ])
+        self.assertIn("openstack network create a", text)
+
+    def test_commands_of_tolerates_an_entry_with_neither_key(self):
+        self.assertEqual(translate.commands_of({"title": "odd"}), [])
 
 
 class TestStore(unittest.TestCase):
@@ -1360,7 +1577,8 @@ class TestPanelViews(unittest.TestCase):
         # looking at a placeholder the page never mentions.
         used = {"$OS_TOKEN"}
         for rule in rules.FORMS:
-            used.update(re.findall(r"\$OS_[A-Z_]+", rule["endpoint"]))
+            for spec in rules.specs(rule):
+                used.update(re.findall(r"\$OS_[A-Z_]+", spec["endpoint"]))
         for table in rules.TABLES.values():
             used.update(re.findall(r"\$OS_[A-Z_]+", table["path"]))
         page = self._page([self._recorded()])
@@ -1370,6 +1588,29 @@ class TestPanelViews(unittest.TestCase):
                          "views.ENVIRONMENT")
         for name in sorted(used):
             self.assertIn(name, page)
+
+    def test_the_footer_explains_the_id_it_could_not_know(self):
+        # $NEW_… is not something to set up front like the others, so it is
+        # not in ENVIRONMENT. The page still has to say what it is, or an
+        # operator meets one in a REST path with nothing to go on.
+        page = self._page([self._recorded()])
+        self.assertIn("$NEW_", page)
+        self.assertIn("id of the resource the first call created", page)
+
+    def test_the_panel_shows_every_command_of_a_multi_call_action(self):
+        entry = translate.translate("/admin/aggregates/create/", {
+            "name": "gpu-nodes",
+            "add_host_to_aggregate_role_member": ["cmp1", "cmp2"],
+        })
+        entry["at"] = 1757000000.0
+        entry["ok"] = True
+        page = self._page([entry])
+        for command in entry["commands"]:
+            self.assertIn(command, page)
+        # One heading, not one per command: it was one thing the operator
+        # did, and the panel says so.
+        self.assertEqual(page.count("Create host aggregate gpu-nodes"), 1)
+        self.assertIn("$NEW_AGGREGATE_ID", page)
 
     def test_the_panel_states_the_cap_it_is_keeping(self):
         from django.test import override_settings
@@ -1507,6 +1748,56 @@ class TestAgainstHorizon(unittest.TestCase):
         self.assertIn("rather than the resource", problems[0])
         self.assertEqual(rules.validate(), [])
 
+    def test_validate_detects_a_renamed_membership_field(self):
+        # The one a step brings with it. A MembershipAction names its
+        # multi-select after its own slug at runtime, so base_fields never
+        # sees it and the ordinary field check cannot. If that name moves,
+        # the step reads an empty list and the follow-up calls simply stop
+        # appearing, with the first command still perfectly correct.
+        rule = dict(next(one for one in rules.FORMS
+                         if one["id"] == "aggregate-create"))
+        step = dict(rule["then"][0], per="hosts_by_some_other_name")
+        rule["then"] = [step]
+        original = rules.FORMS
+        rules.FORMS = [rule]
+        try:
+            problems = rules.validate()
+        finally:
+            rules.FORMS = original
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("stop being recorded", problems[0])
+        self.assertIn("add_host_to_aggregate_role_member", problems[0])
+        self.assertEqual(rules.validate(), [])
+
+    def test_validate_detects_a_renamed_field_on_a_step(self):
+        rule = dict(next(one for one in rules.FORMS
+                         if one["id"] == "user-create"))
+        rule["then"] = [dict(rule["then"][0],
+                             fields=[rules.opt("user_name", "--user")])]
+        original = rules.FORMS
+        rules.FORMS = [rule]
+        try:
+            problems = rules.validate()
+        finally:
+            rules.FORMS = original
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("user_name", problems[0])
+        self.assertIn("step role_add", problems[0])
+        self.assertEqual(rules.validate(), [])
+
+    def test_a_steps_fields_may_come_from_either_action_class(self):
+        # A workflow posts every step at once, so the aggregate's name and
+        # its host list arrive together even though they are declared on
+        # different classes. Checking a step against only its own class
+        # would report the name as missing.
+        rule = next(one for one in rules.FORMS
+                    if one["id"] == "aggregate-create")
+        step = rule["then"][0]
+        own = rules._load_form(step["form"])
+        self.assertNotIn("name", getattr(own, "base_fields", {}),
+                         "if this ever holds, the test proves nothing")
+        self.assertEqual(rules.validate(), [])
+
     def test_validate_detects_a_renamed_table(self):
         # A renamed table is the delete-side version of a moved panel: the
         # action field stops carrying the name we match on, and deletes go
@@ -1612,6 +1903,30 @@ class TestAgainstTheCLI(unittest.TestCase):
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("nowhere to go", problems[0])
         self.assertEqual(rules.verify_cli(), [])
+
+    def test_a_follow_up_step_is_checked_like_any_other_command(self):
+        # "aggregate add host" and "role add" are commands in their own
+        # right, and a rule naming one wrongly fails the same way.
+        rule = dict(next(one for one in rules.FORMS
+                         if one["id"] == "aggregate-create"))
+        rule["then"] = [dict(rule["then"][0],
+                             command=["openstack", "aggregate", "attach"])]
+        problems = self._staged([rule])
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("no longer an openstack command", problems[0])
+        self.assertIn("step aggregate_attach", problems[0])
+        self.assertEqual(rules.verify_cli(), [])
+
+    def test_the_steps_in_the_table_are_real_commands(self):
+        # Named directly, so this layer cannot pass by never reaching them.
+        commands = rules._cli_commands()
+        named = {rules.cli_name(spec["command"])
+                 for form in rules.FORMS for spec in rules.specs(form)
+                 if spec is not form}
+        self.assertEqual(named, {"aggregate_add_host", "role_add"})
+        for name in sorted(named):
+            with self.subTest(name):
+                self.assertIn(name, commands)
 
     def test_the_newest_api_version_of_a_command_is_the_one_checked(self):
         # Several commands are registered once per API version. Horizon talks

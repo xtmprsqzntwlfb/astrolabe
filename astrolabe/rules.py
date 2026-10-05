@@ -101,7 +101,13 @@ def repeated(field, flag, api):
 
 
 def arg(field, api="name"):
-    """A positional argument. Always rendered last, as the CLI expects."""
+    """A positional argument. Always rendered last, as the CLI expects.
+
+    Pass ``api=None`` for a positional that names some *other* resource
+    rather than describing this one -- the aggregate a host is being added
+    to, say. It goes on the command line and stays out of the REST body,
+    where it would read as an attribute of the thing being changed.
+    """
     return {"kind": "positional", "field": field, "api": api}
 
 
@@ -124,9 +130,34 @@ def target(group="id"):
     return {"kind": "target", "field": group}
 
 
-#: Kinds whose ``field`` names a URL capture group rather than a form field.
-#: validate() must not go looking for these in ``base_fields``.
-FROM_URL = frozenset(["target"])
+def item(api=None):
+    """The value a repeating step is currently on. See ``per``.
+
+    A step with ``per`` runs once for each value in a multi-select: one
+    ``aggregate add host`` per host. This stands for whichever one it is on,
+    and like :func:`target` it names no form field, because the field it
+    comes from is the list rather than the value.
+
+    ``api`` places it in the REST body; leave it None to keep it on the
+    command line only.
+    """
+    return {"kind": "item", "field": None, "api": api}
+
+
+#: Kinds whose ``field`` does not name a form field: ``target`` names a URL
+#: capture group and ``item`` names nothing at all. validate() must not go
+#: looking for either in ``base_fields``.
+UNSUBMITTED = frozenset(["target", "item"])
+
+
+def specs(form):
+    """A rule and each of its follow-up steps, which share a shape.
+
+    A step is a rule minus the parts that place it -- no url, no routes, no
+    title -- so everything that walks a rule's command, endpoint and fields
+    can walk a step's too, and does.
+    """
+    return [form] + list(form.get("then") or [])
 
 
 def choice(field, api, choices):
@@ -174,6 +205,25 @@ def redacted(field, flag):
 #
 # ``form`` names the Horizon class this rule was written against, as
 # "module:ClassName". It is used only by validate().
+#
+# A rule may carry ``then``: follow-up steps, for the panels where saving one
+# form makes more than one API call. A step has a rule's command, method,
+# endpoint, envelope and fields, and three keys of its own:
+#
+#   ``per``     a multi-select field; the step runs once per selected value,
+#               which item() stands for. No selection, no step.
+#   ``when``    field names that must all carry a value, for a step Horizon
+#               itself only makes sometimes.
+#   ``form``    the action class the step's own fields come from, where that
+#               differs from the rule's. A workflow POSTs every step at once,
+#               so either class's fields may appear; validate() accepts both.
+#
+# Follow-up calls need the id of the thing the first call created, and
+# Astrolabe never sees a response, so it cannot know it. The rule says
+# ``creates``, a placeholder that ``{new}`` in a step's endpoint resolves to,
+# and the panel footer explains it. Only the REST half needs this: the
+# commands address the new resource by the name the operator typed, which is
+# what makes them runnable as they stand.
 
 FORMS = [
     {
@@ -317,13 +367,34 @@ FORMS = [
         "endpoint": COMPUTE + "/os-aggregates",
         "envelope": "aggregate",
         "command": ["openstack", "aggregate", "create"],
-        # The workflow's second step adds hosts, through a separate action
-        # class and a separate API call per host. That is beyond a rule, which
-        # describes one form and one command; the recorded command creates an
-        # empty aggregate. See Known limits.
+        "creates": "$NEW_AGGREGATE_ID",
         "fields": [
             opt("availability_zone", "--zone"),
             arg("name"),
+        ],
+        # The workflow's second step adds hosts, one Nova call each.
+        "then": [
+            {
+                # A MembershipAction builds its field in __init__ rather than
+                # declaring it, so base_fields has never heard of it and
+                # validate() cannot look it up the usual way. It checks the
+                # name against Horizon's own get_member_field_name instead,
+                # which is where this spelling comes from.
+                "form": ADMIN + "aggregates.workflows"
+                                ":AddHostsToAggregateAction",
+                "per": "add_host_to_aggregate_role_member",
+                "command": ["openstack", "aggregate", "add", "host"],
+                "method": "POST",
+                "endpoint": COMPUTE + "/os-aggregates/{new}/action",
+                "envelope": "add_host",
+                "fields": [
+                    # The aggregate, by the name the operator just typed.
+                    # api=None because this names the resource being added
+                    # to, and Nova's add_host body carries only the host.
+                    arg("name", api=None),
+                    item(api="host"),
+                ],
+            },
         ],
     },
     {
@@ -571,15 +642,15 @@ FORMS = [
         "endpoint": IDENTITY + "/users",
         "envelope": "user",
         "command": ["openstack", "user", "create"],
-        # Four form fields are deliberately unmapped, and uncovered() lists
+        # Three form fields are deliberately unmapped, and uncovered() lists
         # them: confirm_password (never read), domain_name (display only,
-        # domain_id is submitted beside it), role_id (Horizon assigns the role
-        # in a second API call, which one command cannot express) and
-        # lock_password, which is a checkbox rather than a credential but
-        # whose name matches the secret filter, so read_fields drops it before
-        # a rule could see it. Narrowing that filter to let one boolean
-        # through is a bad trade: the cost of getting it wrong is a leaked
-        # password, and the gain is --enable-lock-password.
+        # domain_id is submitted beside it) and lock_password, which is a
+        # checkbox rather than a credential but whose name matches the secret
+        # filter, so read_fields drops it before a rule could see it.
+        # Narrowing that filter to let one boolean through is a bad trade: the
+        # cost of getting it wrong is a leaked password, and the gain is
+        # --enable-lock-password. role_id is covered by the follow-up step.
+        "creates": "$NEW_USER_ID",
         "fields": [
             opt("domain_id", "--domain"),
             opt("project", "--project", api="default_project_id"),
@@ -588,6 +659,28 @@ FORMS = [
             redacted("password", "--password-prompt"),
             boolean("enabled", "enabled", off="--disable"),
             arg("name"),
+        ],
+        # Horizon grants the primary role in a second call, and only when a
+        # project and a role were both chosen -- the two fields are optional
+        # and mean nothing apart.
+        "then": [
+            {
+                "when": ["project", "role_id"],
+                "command": ["openstack", "role", "add"],
+                "method": "PUT",
+                # No envelope: Keystone grants a role with an empty PUT, and
+                # the whole request is in the path.
+                "envelope": None,
+                "endpoint": IDENTITY + "/projects/{project}/users/{new}"
+                                       "/roles/{role_id}",
+                "fields": [
+                    # The user by the name just typed, which is what makes
+                    # this command runnable without knowing the new id.
+                    opt("name", "--user"),
+                    opt("project", "--project"),
+                    arg("role_id", api=None),
+                ],
+            },
         ],
     },
     {
@@ -805,6 +898,70 @@ def _check_tables(problems):
                 "being recorded" % (key, target, actual))
 
 
+def _check_member_field(step, label, problems):
+    """Confirm a repeating step still knows what its list is called.
+
+    A MembershipAction builds its multi-select in ``__init__`` from its own
+    slug, so the name never appears in ``base_fields`` and the usual check
+    cannot see it. Horizon's own ``get_member_field_name`` is asked instead,
+    with the class standing in for the instance, which it can do because the
+    slug the method reads is a class attribute. That tracks upstream's naming
+    rather than copying it: if the scheme changes, this says so.
+    """
+    target = step.get("form")
+    if not target:
+        problems.append(
+            "%s: a step with per= names no form, so %r cannot be checked"
+            % (label, step["per"]))
+        return
+    try:
+        action = _load_form(target)
+        actual = action.get_member_field_name(action, "member")
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        problems.append(
+            "%s: cannot derive the member field of %s (%s)"
+            % (label, target, exc))
+        return
+    if actual != step["per"]:
+        problems.append(
+            "%s: %s now posts its selection as %r, not %r, so the follow-up "
+            "calls stop being recorded" % (label, target, actual, step["per"]))
+
+
+def _check_fields(spec, label, known, problems):
+    """Confirm every field a spec reads is still on the form it came from."""
+    for field in spec["fields"]:
+        if field["kind"] in UNSUBMITTED:
+            continue
+        if field["field"] not in known:
+            problems.append(
+                "%s: field %r is no longer on the form"
+                % (label, field["field"]))
+
+
+def _known_fields(targets, label, problems):
+    """The field names of one or more form classes, as one set.
+
+    More than one because a workflow posts every step at once: a follow-up
+    step's fields may be declared on its own action class or on the one the
+    rule targets, and from the submission they are indistinguishable.
+    """
+    known = set()
+    for target in targets:
+        try:
+            form_class = _load_form(target)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            problems.append(
+                "%s: cannot import %s (%s)" % (label, target, exc))
+            return None
+        known |= set(getattr(form_class, "base_fields", {}))
+    if not known:
+        problems.append(
+            "%s: %s exposes no base_fields" % (label, ", ".join(targets)))
+        return None
+    return known
+
+
 def validate():
     """Check every rule still describes the Horizon it targets.
 
@@ -812,6 +969,10 @@ def validate():
     class and its field names, the URL the rule matches on, and the table name
     deletes arrive under. A rule can be perfectly correct about its fields and
     still never fire.
+
+    Follow-up steps are checked the same way, plus the one thing peculiar to
+    them: a repeating step's multi-select is named at runtime rather than
+    declared, so its name is re-derived instead of looked up.
 
     Returns a list of human-readable problems, empty when all is well. Imports
     Horizon lazily, so this module remains usable without a dashboard present.
@@ -823,24 +984,18 @@ def validate():
         target = form.get("form")
         if not target:
             continue
-        try:
-            form_class = _load_form(target)
-        except Exception as exc:  # noqa: BLE001 - reported, never raised
-            problems.append(
-                "%s: cannot import %s (%s)" % (form["id"], target, exc))
-            continue
-        known = set(getattr(form_class, "base_fields", {}))
-        if not known:
-            problems.append(
-                "%s: %s exposes no base_fields" % (form["id"], target))
-            continue
-        for field in form["fields"]:
-            if field["kind"] in FROM_URL:
-                continue
-            if field["field"] not in known:
-                problems.append(
-                    "%s: field %r is no longer on %s"
-                    % (form["id"], field["field"], target))
+        for step in specs(form):
+            label = form["id"]
+            if step is not form:
+                label = "%s step %s" % (form["id"], cli_name(step["command"]))
+                if step.get("per"):
+                    _check_member_field(step, label, problems)
+            targets = [target]
+            if step.get("form") and step is not form:
+                targets.append(step["form"])
+            known = _known_fields(targets, label, problems)
+            if known is not None:
+                _check_fields(step, label, known, problems)
     return problems
 
 
@@ -860,8 +1015,9 @@ def uncovered():
             form_class = _load_form(target)
         except Exception:  # noqa: BLE001 - validate() reports this properly
             continue
-        mapped = {field["field"] for field in form["fields"]
-                  if field["kind"] not in FROM_URL}
+        mapped = {field["field"] for spec in specs(form)
+                  for field in spec["fields"]
+                  if field["kind"] not in UNSUBMITTED}
         missing = sorted(set(getattr(form_class, "base_fields", {})) - mapped)
         if missing:
             report[form["id"]] = missing
@@ -897,14 +1053,14 @@ def cli_name(command):
     return "_".join(command[1:])
 
 
-def flags(form):
-    """Every flag a rule can put on the command line.
+def flags(spec):
+    """Every flag a rule or step can put on the command line.
 
     Spread across four keys, because a value carries one flag, a checkbox
     carries one per side and a select carries one per option.
     """
     found = []
-    for field in form["fields"]:
+    for field in spec["fields"]:
         for key in ("flag", "on", "off"):
             if field.get(key):
                 found.append(field[key])
@@ -912,6 +1068,12 @@ def flags(form):
             if option["flag"]:
                 found.append(option["flag"])
     return found
+
+
+def takes_positional(spec):
+    """Whether a spec ends its command with something, as all of them do."""
+    return any(field["kind"] in ("positional", "target", "item")
+               for field in spec["fields"])
 
 
 def _entry_point_groups():
@@ -1010,10 +1172,12 @@ def verify_cli():
     problems = []
     commands = _cli_commands()
     for form in FORMS:
-        # Every rule ends in a positional: a create names its subject, an
-        # edit names the resource it is editing.
-        _check_cli(cli_name(form["command"]), form["id"], flags(form),
-                   True, commands, problems)
+        for spec in specs(form):
+            label = form["id"]
+            if spec is not form:
+                label = "%s step %s" % (form["id"], cli_name(spec["command"]))
+            _check_cli(cli_name(spec["command"]), label, flags(spec),
+                       takes_positional(spec), commands, problems)
     for key, table in TABLES.items():
         name = cli_name(["openstack"] + table["noun"].split() + ["delete"])
         _check_cli(name, "table %s" % key, [], True, commands, problems)

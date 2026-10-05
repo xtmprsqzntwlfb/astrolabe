@@ -157,6 +157,12 @@ Deletes are handled by one generic rule that decodes Horizon's
 ``<table>__<action>__<id>`` action encoding, so row actions and multi-select
 batch deletes both work.
 
+Two of these take more than one call, and come out as more than one command
+under a single heading, because they were a single thing the operator did.
+Creating a host aggregate with three hosts selected is an ``aggregate create``
+followed by three ``aggregate add host``; creating a user with a primary
+project and a role is a ``user create`` followed by a ``role add``.
+
 
 Roles are the exception to "it just works". Horizon ships the roles panel as
 its AngularJS variant by default (``ANGULAR_FEATURES['roles_panel']``), and
@@ -432,7 +438,7 @@ Extending the rule table
 
 Adding a panel means adding one entry to ``FORMS`` in ``astrolabe/rules.py``.
 Nothing else changes. A rule names the URL it matches, the command and
-endpoint it maps to, and the fields it carries. Seven field kinds cover
+endpoint it maps to, and the fields it carries. Eight field kinds cover
 everything so far:
 
 ``opt(field, flag, api, cast, omit_when, absent_when, clearable)``
@@ -464,7 +470,16 @@ everything so far:
     leaving the sentinel out of the map is all a rule has to say.
 
 ``arg(field, api)``
-    A positional argument. Always rendered last, as the CLI expects.
+    A positional argument. Always rendered last, as the CLI expects. Pass
+    ``api=None`` for one that names some *other* resource rather than
+    describing this one — the aggregate a host is being added to — so it goes
+    on the command line and stays out of the REST body.
+
+``item(api)``
+    The value a repeating step is currently on; see ``per`` below. One
+    ``aggregate add host`` per selected host, and this is whichever host that
+    is. Like ``target`` it names no form field, because the field it comes
+    from holds the list rather than the value.
 
 ``target(group)``
     The resource an edit form is editing, read out of the URL rather than
@@ -482,6 +497,31 @@ everything so far:
     field and an empty one look identical from here, so use it only for fields
     the form requires. Nothing reaches the REST body. The field name is still
     recorded, so ``validate()`` keeps checking it exists.
+
+When one saved form makes more than one API call, a rule carries ``then``:
+follow-up steps. A step is a rule minus the parts that place it — no ``url``,
+no ``routes``, no ``title`` — so the same interpreter reads it, and nearly
+every check that applies to a rule applies to a step too. Three keys are its
+own: ``per`` names a multi-select and runs the step once per selected value,
+which ``item()`` stands for; ``when`` names fields that must all carry a value,
+for a call Horizon itself only makes sometimes; and ``form`` names the action
+class the step's own fields come from, where that differs from the rule's. A
+workflow posts every step at once, so either class's fields may turn up in the
+submission and ``validate()`` accepts both.
+
+A follow-up call needs the id of the thing the first call created, and
+Astrolabe never sees a response, so it cannot know it. The rule declares
+``creates``, a placeholder that ``{new}`` in a step's endpoint resolves to, and
+the panel footer explains it. **Only the REST half needs this.** The commands
+address the new resource by the name the operator typed, which is what keeps
+them runnable exactly as rendered — ``openstack aggregate add host gpu-nodes
+compute-1`` needs no id at all.
+
+A repeating step has one thing nothing else does: its multi-select is built in
+the action's ``__init__`` from the action's own slug, so the name never reaches
+``base_fields`` and the ordinary field check cannot see it. ``validate()`` asks
+Horizon's own ``get_member_field_name`` instead, so a change to that naming
+scheme is reported rather than silently dropping every follow-up call.
 
 Alongside the fields, a rule records where it lives. ``routes`` lists the
 Horizon URL names the rule serves — usually one, two for routers — and
@@ -626,10 +666,12 @@ somebody has upgraded and lost a recording.
 
 Layer 4 stages each drift it claims to catch and asserts it is reported — a
 renamed field, a moved panel, a URL name that stopped reversing, an id
-captured from the wrong path segment, a renamed table — so none of the five
-can pass vacuously. Layer 5 does the same for its three: a withdrawn flag, a
-renamed command, a command that stopped taking a positional. It also asserts
-it resolved a plausible number of commands and flags, because an entry point
+captured from the wrong path segment, a renamed table, a renamed field on a
+follow-up step, and a membership multi-select that changed name — so none of
+the seven can pass vacuously. Layer 5 does the same for its four: a withdrawn
+flag, a renamed command, a command that stopped taking a positional, and a
+follow-up step naming a command that does not exist. It also asserts it
+resolved a plausible number of commands and flags, because an entry point
 layout it did not expect would find nothing to check and look exactly like a
 clean run.
 
@@ -657,13 +699,10 @@ Known limits
   clear one once it is set; and names, which every form but the router's
   requires anyway. For those, the recorded command leaves the old value
   alone. A command that is short beats one that fails.
-* **Create user is deliberately incomplete in two places.** Astrolabe never
-  reads the password, so the command ends up with ``--password-prompt`` and the
-  ``curl`` body has no password in it at all — the CLI form asks you at run
-  time, the REST form you must fill in yourself. Horizon also assigns the
-  primary role in a second API call, which one command cannot express, so the
-  recorded ``openstack user create`` leaves the new user unroled. Add the
-  matching ``openstack role add`` yourself.
+* **Create user never records the password.** The command ends up with
+  ``--password-prompt`` and the ``curl`` body has no password in it at all —
+  the CLI form asks you at run time, the REST form you must fill in yourself.
+  The primary role *is* recorded, as a second ``openstack role add``.
 * **Edit user names fields Horizon would have left out.** Horizon drops the
   primary project and the description from its request unless you actually
   changed them; Astrolabe sees the submitted form and not which boxes were
@@ -693,23 +732,22 @@ Known limits
   a gateway network was chosen too, nested beside the network id, and a rule
   cannot make one field depend on another. Unticking it is invisible here, so
   add ``--disable-snat`` yourself if you meant it.
-* **Create host aggregate records only the first step.** The workflow's
-  second step adds hosts, through a separate action class and one API call
-  per host, which a rule describing one form and one command cannot express.
-  The recorded command creates an empty aggregate; add the matching
-  ``openstack aggregate add host`` calls yourself.
-* **Edit project and edit domain record only their first step.** Both are
-  workflows whose remaining steps add and remove member and group role
-  assignments, one API call per change, against a membership list Astrolabe
-  never sees. The recorded command covers the name, description and enabled
-  state; the role changes made in the same dialog are not recorded. Editing
-  the host list of an aggregate is a separate panel and is not recorded
-  either, for the same reason.
-* **Flavors cannot be edited, by Horizon or by Astrolabe.** The "Edit Flavor"
-  button opens a form that changes which projects may use the flavor, not the
-  flavor, and it issues one call per project added or removed. That is
-  ``openstack flavor set --project`` and ``flavor unset --project``, as many
-  commands as projects changed, which is not something one rule can describe.
+* **Editing a membership list is not recorded, anywhere.** This is the one
+  thing follow-up steps do not solve, and the reason is not the number of
+  calls. Changing the members of a project or a domain, the hosts of an
+  existing aggregate, or the projects a flavor is available to, means
+  *diffing* what you selected against what was there before — one call per
+  addition and one per removal. Astrolabe sees the selection and never the
+  starting point, so it cannot tell an addition from a value that was already
+  set, and it cannot see a removal at all. Adding hosts while *creating* an
+  aggregate is recorded precisely because there is nothing to diff against:
+  the aggregate did not exist a moment ago.
+
+  In practice that means: *Edit Project* and *Edit Domain* record their first
+  step only, the name, description and enabled state, and not the role changes
+  made in the same dialog; *Manage Hosts* on an existing aggregate records
+  nothing; and *Edit Flavor*, which despite the name edits only the list of
+  projects that may use the flavor, records nothing either.
 * Rendered commands reproduce what was submitted. They are a starting point for
   a script, not a tested one — read them before you run them.
 * The ``curl`` equivalents target the real service APIs, not Horizon's proxy, so
