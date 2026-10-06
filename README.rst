@@ -335,10 +335,24 @@ setting.
     and costs nothing per request. The panel stays visible and empty.
 
 ``ASTROLABE_MAX_ENTRIES``
-    Default ``50``. Entries kept per session. Horizon's default session backend
-    is the cache, where 50 is nothing. Lower it if you have switched
-    ``SESSION_ENGINE`` to ``django.contrib.sessions.backends.signed_cookies``,
-    which puts the whole session in a ~4KB cookie.
+    Default ``50``. Entries kept per session. On the cache backend, which is
+    what most deployments run, 50 is nothing and you can leave this alone.
+
+    Lower it on ``signed_cookies``, where the whole session travels in one
+    cookie with a budget of roughly 4KB before signing and base64 inflate it.
+    That is worth knowing about rather than filing under exotic: it is the
+    engine Horizon's own ``local_settings.py.example`` offers for ``tox -e
+    runserver``, so it is probably what you are developing against. Django
+    does not check the size — it signs the cookie and sets it, and the browser
+    silently drops one that is too big, which logs you out rather than
+    truncating the log.
+
+    The cap counts entries, but what matters is bytes, and the two came apart
+    once one saved form could record several commands. A one-call entry is a
+    few hundred bytes; creating a host aggregate with thirty hosts selected
+    comes to about 6.5KB on its own, with hostnames of ordinary length. On
+    ``signed_cookies`` that single action overruns the budget however low the
+    cap goes.
 
 Local dev setup (tox runserver against a devstack VM)
 =====================================================

@@ -1234,6 +1234,32 @@ class TestStore(unittest.TestCase):
     def test_a_junk_session_value_does_not_crash_the_panel(self):
         self.assertEqual(store.load(Session({store.SESSION_KEY: "junk"})), [])
 
+    def test_one_action_can_outgrow_a_whole_cookie_session(self):
+        """The claim store.py makes to operators, kept true by measurement.
+
+        A number written into a docstring rots quietly. This asserts the
+        shape of the advice rather than the figure: that a single recorded
+        action can exceed the ~4KB a ``signed_cookies`` session gets, so
+        lowering the entry cap is necessary without being sufficient.
+        """
+        one_call = translate.translate("/admin/flavors/create/", {
+            "name": "m1.small", "vcpus": "1", "memory_mb": "2048",
+            "disk_gb": "20",
+        })
+        many_calls = translate.translate("/admin/aggregates/create/", {
+            "name": "gpu-nodes", "availability_zone": "az-gpu",
+            "add_host_to_aggregate_role_member":
+                ["compute-%02d.example.net" % n for n in range(30)],
+        })
+        for entry in (one_call, many_calls):
+            entry["at"] = 1757000000.0
+            entry["ok"] = True
+        self.assertLess(len(json.dumps(one_call)), 1024,
+                        "an ordinary entry is meant to be small")
+        self.assertGreater(len(json.dumps(many_calls)), 4096,
+                           "store.py tells operators this one does not fit; "
+                           "if it now does, go and fix the docstring")
+
     def test_entries_are_json_serialisable(self):
         # Django's default session serialiser is JSON, so an entry carrying
         # anything else would fail at save time, inside the operator's action.
