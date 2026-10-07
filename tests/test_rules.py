@@ -60,7 +60,7 @@ from astrolabe import store  # noqa: E402
 from astrolabe import translate  # noqa: E402
 
 KINDS = {"value", "flag", "multi", "positional", "redacted",
-         "choice", "target", "item"}
+         "choice", "target", "item", "lines", "pairs", "parent"}
 
 
 def every_spec():
@@ -208,11 +208,26 @@ class TestRuleSet(unittest.TestCase):
         # Per spec rather than per rule, because a step builds a body of its
         # own. Redacted fields and command-only positionals have no api key
         # at all: they contribute nothing to any body, on purpose.
+        #
+        # Two fields may share a key when they cannot both fire, which is
+        # how a subnet's gateway is written either from the box the operator
+        # typed in or from the one that disables it. The exclusion has to be
+        # declared, not assumed: one of them says "unless" of the other.
         for form, spec in every_spec():
-            keys = [field["api"] for field in spec["fields"]
-                    if field.get("api")]
-            with self.subTest(form["id"], command=" ".join(spec["command"])):
-                self.assertEqual(len(keys), len(set(keys)))
+            seen = {}
+            for field in spec["fields"]:
+                key = field.get("api")
+                if not key:
+                    continue
+                with self.subTest(form["id"], api=key):
+                    for other in seen.get(key, []):
+                        self.assertTrue(
+                            field["field"] in
+                            (other.get("unless") or []) or
+                            other["field"] in (field.get("unless") or []),
+                            "%r is written by two fields that can both "
+                            "fire" % key)
+                seen.setdefault(key, []).append(field)
 
     def test_no_api_key_is_nested_under_another(self):
         # _put walks a dotted path with setdefault, so a rule writing both
@@ -325,15 +340,19 @@ class TestRuleSet(unittest.TestCase):
                 self.assertTrue(rules.takes_positional(spec))
 
     def test_a_step_naming_a_new_id_has_one_to_name(self):
-        # {new} resolves from the rule's creates. Without it the endpoint
-        # would render with a literal "{new}" still in it, which looks like
-        # a value rather than like the gap it is.
+        # The id of the thing the first call made reaches a later call two
+        # ways: {new} in the path, for a call made *against* it, and a
+        # parent field in the body, for a resource made *inside* it. Either
+        # way it resolves from the rule's creates, and without that the
+        # endpoint renders with a literal "{new}" still in it.
         for form, spec in every_spec():
-            needs = "{new}" in spec["endpoint"]
+            needs = ("{new}" in spec["endpoint"] or
+                     any(f["kind"] == "parent" for f in spec["fields"]))
+            if not needs:
+                continue
             with self.subTest(form["id"], endpoint=spec["endpoint"]):
-                if needs:
-                    self.assertTrue(form.get("creates"))
-                    self.assertTrue(form["creates"].startswith("$NEW_"))
+                self.assertTrue(form.get("creates"))
+                self.assertTrue(form["creates"].startswith("$NEW_"))
 
     def test_creates_is_only_on_rules_that_follow_up(self):
         # It exists to be substituted into a later call. A rule making one
@@ -344,8 +363,10 @@ class TestRuleSet(unittest.TestCase):
                 continue
             with self.subTest(form["id"]):
                 self.assertTrue(form.get("then"))
-                self.assertTrue(any("{new}" in step["endpoint"]
-                                    for step in form["then"]))
+                self.assertTrue(any(
+                    "{new}" in step["endpoint"] or
+                    any(f["kind"] == "parent" for f in step["fields"])
+                    for step in form["then"]))
 
     def test_a_repeating_step_names_the_form_its_list_lives_on(self):
         # per names a field built at runtime, which base_fields cannot
@@ -589,6 +610,113 @@ class TestTranslate(unittest.TestCase):
                      "/project/networks/net-7/ports/port-1/update"):
             with self.subTest(path):
                 self.assertIsNone(translate.translate(path, {"name": "x"}))
+
+    def test_a_project_network_with_a_subnet_is_two_commands(self):
+        out = translate.translate("/project/networks/create", {
+            "net_name": "web", "admin_state": "on", "shared": "on",
+            "mtu": "1450", "with_subnet": "on",
+            "subnet_name": "web-v4", "cidr": "192.168.1.0/24",
+            "ip_version": "4", "gateway_ip": "192.168.1.1",
+            "enable_dhcp": "on",
+            "dns_nameservers": "8.8.8.8\n1.1.1.1\n",
+            "allocation_pools": "192.168.1.100,192.168.1.120",
+            "host_routes": "10.0.0.0/8,192.168.1.254",
+        })
+        self.assertEqual(out["commands"], [
+            "openstack network create --mtu 1450 --share web",
+            "openstack subnet create --network web "
+            "--subnet-range 192.168.1.0/24 --ip-version 4 "
+            "--gateway 192.168.1.1 --dhcp "
+            "--dns-nameserver 8.8.8.8 --dns-nameserver 1.1.1.1 "
+            "--allocation-pool start=192.168.1.100,end=192.168.1.120 "
+            "--host-route destination=10.0.0.0/8,gateway=192.168.1.254 "
+            "web-v4",
+        ])
+        subnet = out["calls"][1]["body"]["subnet"]
+        self.assertEqual(subnet["dns_nameservers"], ["8.8.8.8", "1.1.1.1"])
+        self.assertEqual(subnet["allocation_pools"],
+                         [{"start": "192.168.1.100", "end": "192.168.1.120"}])
+        # The CLI calls the second half a gateway and Neutron calls it a
+        # nexthop. Same value, two spellings, and the rule knows both.
+        self.assertEqual(subnet["host_routes"],
+                         [{"destination": "10.0.0.0/8",
+                           "nexthop": "192.168.1.254"}])
+
+    def test_the_subnet_belongs_to_a_network_with_no_id_yet(self):
+        out = translate.translate("/project/networks/create", {
+            "net_name": "web", "with_subnet": "on", "subnet_name": "s",
+            "cidr": "10.0.0.0/24", "enable_dhcp": "on",
+        })
+        # The command names the network the operator just named; only the
+        # body needs an id, and there is no id to have.
+        self.assertIn("--network web", out["commands"][1])
+        self.assertEqual(out["calls"][1]["body"]["subnet"]["network_id"],
+                         "$NEW_NETWORK_ID")
+        self.assertNotIn("$NEW_", out["commands"][1])
+
+    def test_an_unticked_create_subnet_box_is_one_command(self):
+        out = translate.translate("/project/networks/create",
+                                  {"net_name": "plain", "admin_state": "on"})
+        self.assertEqual(cli(out), "openstack network create plain")
+        self.assertEqual(len(out["calls"]), 1)
+
+    def test_disabling_the_gateway_beats_a_value_left_in_the_box(self):
+        # "Disable Gateway" hides the gateway input rather than removing it,
+        # so a value typed before the box was ticked is still posted. Both
+        # fields write the same body key, and without the gate the command
+        # would carry two --gateway flags and contradict itself.
+        out = translate.translate("/project/networks/create", {
+            "net_name": "n", "with_subnet": "on", "subnet_name": "s",
+            "cidr": "10.0.0.0/24", "gateway_ip": "10.0.0.1",
+            "no_gateway": "on", "enable_dhcp": "on",
+        })
+        self.assertEqual(out["commands"][1].count("--gateway"), 1)
+        self.assertIn("--gateway none", out["commands"][1])
+        self.assertIsNone(out["calls"][1]["body"]["subnet"]["gateway_ip"])
+
+    def test_a_prefix_length_needs_a_pool_to_apply_to(self):
+        without = translate.translate("/project/networks/create", {
+            "net_name": "n", "with_subnet": "on", "subnet_name": "s",
+            "prefixlen": "26", "enable_dhcp": "on",
+        })
+        self.assertNotIn("--prefix-length", without["commands"][1])
+        self.assertNotIn("prefixlen", without["calls"][1]["body"]["subnet"])
+        with_pool = translate.translate("/project/networks/create", {
+            "net_name": "n", "with_subnet": "on", "subnet_name": "s",
+            "prefixlen": "26", "subnetpool": "pool-1", "enable_dhcp": "on",
+        })
+        self.assertIn("--subnet-pool pool-1 --prefix-length 26",
+                      with_pool["commands"][1])
+
+    def test_blank_lines_in_a_textarea_are_dropped(self):
+        out = translate.translate("/project/networks/create", {
+            "net_name": "n", "with_subnet": "on", "subnet_name": "s",
+            "dns_nameservers": "\n 8.8.8.8 \n\n  \n9.9.9.9\n",
+        })
+        self.assertEqual(
+            out["calls"][1]["body"]["subnet"]["dns_nameservers"],
+            ["8.8.8.8", "9.9.9.9"])
+
+    def test_an_empty_textarea_contributes_nothing(self):
+        out = translate.translate("/project/networks/create", {
+            "net_name": "n", "with_subnet": "on", "subnet_name": "s",
+            "dns_nameservers": "", "allocation_pools": "", "host_routes": "",
+        })
+        subnet = out["calls"][1]["body"]["subnet"]
+        for key in ("dns_nameservers", "allocation_pools", "host_routes"):
+            self.assertNotIn(key, subnet)
+        self.assertNotIn("--dns-nameserver", out["commands"][1])
+
+    def test_the_two_network_create_panels_stay_apart(self):
+        # Different forms, different field names: a submission from one
+        # must not be read by the other's rule. net_name against the admin
+        # rule would render a nameless network.
+        admin = translate.translate("/admin/networks/create/",
+                                    {"name": "a", "admin_state": "on"})
+        project = translate.translate("/project/networks/create",
+                                      {"net_name": "p", "admin_state": "on"})
+        self.assertEqual(cli(admin), "openstack network create a")
+        self.assertEqual(cli(project), "openstack network create p")
 
     def test_a_project_network_edit_says_nothing_about_external(self):
         # The reason these are two rules and not one. The project form has
@@ -1981,7 +2109,8 @@ class TestAgainstTheCLI(unittest.TestCase):
         named = {rules.cli_name(spec["command"])
                  for form in rules.FORMS for spec in rules.specs(form)
                  if spec is not form}
-        self.assertEqual(named, {"aggregate_add_host", "role_add"})
+        self.assertEqual(named,
+                         {"aggregate_add_host", "role_add", "subnet_create"})
         for name in sorted(named):
             with self.subTest(name):
                 self.assertIn(name, commands)

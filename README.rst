@@ -129,7 +129,7 @@ Action                         Rendered as
 ============================== ====================================
 Create flavor                  ``openstack flavor create``
 Create volume type             ``openstack volume type create``
-Create network (admin)         ``openstack network create``
+Create network                 ``openstack network create``
 Create project                 ``openstack project create``
 Create domain                  ``openstack domain create``
 Create group                   ``openstack group create``
@@ -218,9 +218,11 @@ matching both paths would read that missing box as unticked and render
 naming the fields its own form has, and neither saying anything about a field
 it does not offer.
 
-Creating is still admin-only. The project panel is a multi-step workflow that
-makes a subnet alongside the network, under entirely different field names;
-it needs a rule of its own. See Known limits.
+Creating takes two rules for the same reason, and the project one is the
+wizard: a single submission makes the network and, if **Create Subnet** is
+ticked, a subnet inside it. Its field names are its own throughout --
+``net_name`` where the admin form says ``name`` -- so neither rule could read
+the other's submission even if the paths let it.
 
 Endpoints and the token
 -----------------------
@@ -456,7 +458,7 @@ Extending the rule table
 
 Adding a panel means adding one entry to ``FORMS`` in ``astrolabe/rules.py``.
 Nothing else changes. A rule names the URL it matches, the command and
-endpoint it maps to, and the fields it carries. Eight field kinds cover
+endpoint it maps to, and the fields it carries. Eleven field kinds cover
 everything so far:
 
 ``opt(field, flag, api, cast, omit_when, absent_when, clearable)``
@@ -499,6 +501,34 @@ everything so far:
     is. Like ``target`` it names no form field, because the field it comes
     from holds the list rather than the value.
 
+``lines(field, flag, api)``
+    A textarea holding one value per line, emitted as the flag per line —
+    a subnet's DNS servers. Blank lines are dropped, the way Horizon drops
+    them.
+
+``pairs(field, flag, api, keys, api_keys)``
+    A textarea whose lines are comma-separated values with known names. An
+    allocation pool is typed ``192.168.1.100,192.168.1.120``, reaches Neutron
+    as ``{"start": …, "end": …}`` and the CLI as ``--allocation-pool
+    start=…,end=…``. ``keys`` names the parts for the command and ``api_keys``
+    for the body, because they do not always agree: a host route's second
+    value is the ``gateway`` to the CLI and the ``nexthop`` to Neutron.
+
+``parent(field, flag, api)``
+    The resource the rule's first call created, as a follow-up step sees it —
+    the network a subnet is going into. The command names it, because the
+    operator typed a name and the CLI resolves one; the body gets the rule's
+    ``creates`` placeholder, because it wants an id that does not exist yet.
+
+Any of these can be wrapped in ``only(field, when, unless)``, which gates it
+on the state of other fields. Horizon's forms are full of fields that mean
+something only in company: a subnet's prefix length is sent only alongside an
+address pool, and its gateway only when **Disable Gateway** is clear. The
+second is not hypothetical tidiness — that checkbox *hides* the gateway input
+rather than removing it, so a value typed before it was ticked is still
+posted, and an ungated rule would render two contradictory ``--gateway``
+flags.
+
 ``target(group)``
     The resource an edit form is editing, read out of the URL rather than
     the submission. An edit form sends what the resource should become; the
@@ -523,9 +553,10 @@ every check that applies to a rule applies to a step too. Three keys are its
 own: ``per`` names a multi-select and runs the step once per selected value,
 which ``item()`` stands for; ``when`` names fields that must all carry a value,
 for a call Horizon itself only makes sometimes; and ``form`` names the action
-class the step's own fields come from, where that differs from the rule's. A
-workflow posts every step at once, so either class's fields may turn up in the
-submission and ``validate()`` accepts both.
+class the step's own fields come from, where that differs from the rule's — a
+list of them, where one step spans two, as the project subnet step does. A
+workflow posts every step at once, so any of those classes' fields may turn up
+in the submission and ``validate()`` accepts them all.
 
 A follow-up call needs the id of the thing the first call created, and
 Astrolabe never sees a response, so it cannot know it. The rule declares
@@ -728,9 +759,12 @@ Known limits
   them to what they already are, which is longer than it needs to be rather
   than wrong. Neither the password nor the domain is recorded: the password is
   changed on a panel of its own, and Keystone does not let a user move domain.
-* **Network create is recorded from the admin panel only.** The project
-  panel is a different form — a workflow that also creates a subnet — and
-  needs a rule of its own. See "Which dashboard a panel lives in".
+* **A subnet's IPv6 mode is not recorded.** Horizon offers one menu whose
+  value it splits on ``/`` into an RA mode and an address mode, and sends
+  only for an IPv6 subnet. Two flags out of one field, conditional on a
+  second field, for a select that is "No options specified" by default: the
+  machinery costs more than the field is worth. Add ``--ipv6-ra-mode`` and
+  ``--ipv6-address-mode`` yourself if you set it.
 * **A router created from the project dashboard records no owning project.**
   Only the admin form offers a project selector. From the project side Horizon
   uses whatever scope you are in, and there is no field to record, so the

@@ -42,6 +42,7 @@ IDENTITY = "$OS_IDENTITY_API"
 # Import prefixes, only to keep the table list below readable.
 ADMIN = "openstack_dashboard.dashboards.admin."
 IDENT = "openstack_dashboard.dashboards.identity."
+PROJ = "openstack_dashboard.dashboards.project."
 
 
 # --------------------------------------------------------------- field kinds
@@ -98,6 +99,64 @@ def boolean(field, api, on=None, off=None):
 def repeated(field, flag, api):
     """A multi-select, emitted as the flag once per value."""
     return {"kind": "multi", "field": field, "flag": flag, "api": api}
+
+
+def lines(field, flag, api):
+    """A textarea holding one value per line, emitted as the flag per line.
+
+    Horizon's subnet form collects DNS servers this way: a box the operator
+    types into, read back with ``splitlines()``. Blank lines are dropped,
+    the way Horizon drops them.
+    """
+    return {"kind": "lines", "field": field, "flag": flag, "api": api}
+
+
+def pairs(field, flag, api, keys, api_keys=None):
+    """A textarea whose lines are comma-separated values with known names.
+
+    An allocation pool is typed as ``192.168.1.100,192.168.1.120`` and goes
+    to Neutron as ``{"start": ..., "end": ...}``; the CLI spells the same
+    thing ``--allocation-pool start=...,end=...``. ``keys`` names the parts
+    for the command line and ``api_keys`` for the body, because the two do
+    not always agree -- a host route's second value is the ``gateway`` to
+    the CLI and the ``nexthop`` to Neutron.
+
+    Short lines are zipped, not rejected, which is what Horizon does with
+    them: a malformed line produces a malformed request either way, and the
+    form has already marked the submission rejected.
+    """
+    return {
+        "kind": "pairs", "field": field, "flag": flag, "api": api,
+        "keys": list(keys), "apiKeys": list(api_keys or keys),
+    }
+
+
+def parent(field, flag, api):
+    """The resource the rule's first call created, as a later step sees it.
+
+    A subnet belongs to the network created a moment earlier. The command
+    can say so plainly, because the operator typed a name and the CLI
+    resolves one; the REST body cannot, because it wants the id, and the id
+    only exists once the first call has returned. So the body carries the
+    rule's ``creates`` placeholder, the same one ``{new}`` puts in a path.
+    """
+    return {"kind": "parent", "field": field, "flag": flag, "api": api}
+
+
+def only(field, when=None, unless=None):
+    """Gate a field on the state of others. Wraps any of the kinds above.
+
+    Horizon's forms are full of fields that mean something only in company:
+    a subnet's prefix length is sent only alongside an address pool, and its
+    gateway only when "Disable Gateway" is clear. A rule that emitted them
+    regardless would render two ``--gateway`` flags, or a prefix length for
+    a subnet that has no pool to take it from.
+
+    ``when`` names fields that must all carry a value, ``unless`` fields
+    that must all be empty. Absent counts as empty, and an unticked checkbox
+    is absent.
+    """
+    return dict(field, when=list(when or []), unless=list(unless or []))
 
 
 def arg(field, api="name"):
@@ -169,6 +228,11 @@ def choice(field, api, choices):
     ``distributed`` only once the operator has picked centralized or
     distributed. Leaving the sentinel out of the map says that, without the
     rule having to name it.
+
+    An option's flag may carry a fixed value -- ``"--gateway none"`` -- for
+    the cases where the CLI spells a choice as a word rather than a switch.
+    The interpreter splits it, and :func:`flags` reports only the flag, so
+    verify_cli() checks the part a parser would know about.
 
     Pass None as the flag for an option the CLI expresses by saying nothing.
     """
@@ -352,6 +416,82 @@ FORMS = [
             boolean("external", "router:external",
                     on="--external", off="--internal"),
             target(),
+        ],
+    },
+    {
+        "id": "network-create-project",
+        "title": "Create network",
+        # The project panel is a wizard, not a plain form: one submission
+        # creates the network and, if the box is ticked, a subnet inside it.
+        # Field names are its own throughout -- net_name where the admin
+        # form says name -- because the two forms are unrelated classes.
+        "url": r"/project/networks/create/?$",
+        "form": PROJ + "networks.workflows:CreateNetworkInfoAction",
+        "routes": ["horizon:project:networks:create"],
+        "method": "POST",
+        "endpoint": NETWORK + "/networks",
+        "envelope": "network",
+        "command": ["openstack", "network", "create"],
+        "creates": "$NEW_NETWORK_ID",
+        # No provider attributes and no external box here; those belong to
+        # the admin form. with_subnet is unmapped on purpose and uncovered()
+        # lists it: it describes nothing about the network, it decides
+        # whether the step below happens, which is what "when" reads it for.
+        "fields": [
+            opt("mtu", "--mtu", cast="int"),
+            boolean("admin_state", "admin_state_up", off="--disable"),
+            boolean("shared", "shared", on="--share"),
+            repeated("az_hints", "--availability-zone-hint",
+                     "availability_zone_hints"),
+            arg("net_name"),
+        ],
+        "then": [
+            {
+                "when": ["with_subnet"],
+                # Two action classes, posted together as one form. Neither
+                # alone holds all the fields below.
+                "form": [PROJ + "networks.workflows:CreateSubnetInfoAction",
+                         PROJ + "networks.workflows"
+                                ":CreateSubnetDetailAction"],
+                "command": ["openstack", "subnet", "create"],
+                "method": "POST",
+                "endpoint": NETWORK + "/subnets",
+                "envelope": "subnet",
+                # ipv6_modes is unmapped, and uncovered() lists it. Horizon
+                # sends it only for an IPv6 subnet, and splits one menu value
+                # on "/" into two separate attributes. Two flags from one
+                # field, conditional on a second field: more machinery than
+                # one optional select is worth. See Known limits.
+                "fields": [
+                    parent("net_name", "--network", api="network_id"),
+                    opt("cidr", "--subnet-range"),
+                    opt("ip_version", "--ip-version", cast="int"),
+                    opt("subnetpool", "--subnet-pool", api="subnetpool_id"),
+                    # Sent only alongside a pool, which is the only thing it
+                    # could apply to.
+                    only(opt("prefixlen", "--prefix-length", cast="int"),
+                         when=["subnetpool"]),
+                    # "Disable Gateway" hides this input rather than removing
+                    # it, so a gateway typed before the box was ticked is
+                    # still posted. Without the gate the command would carry
+                    # two --gateway flags.
+                    only(opt("gateway_ip", "--gateway"),
+                         unless=["no_gateway"]),
+                    choice("no_gateway", "gateway_ip", {
+                        "on": ("--gateway none", None),
+                    }),
+                    boolean("enable_dhcp", "enable_dhcp",
+                            on="--dhcp", off="--no-dhcp"),
+                    lines("dns_nameservers", "--dns-nameserver",
+                          "dns_nameservers"),
+                    pairs("allocation_pools", "--allocation-pool",
+                          "allocation_pools", ("start", "end")),
+                    pairs("host_routes", "--host-route", "host_routes",
+                          ("destination", "gateway"),
+                          api_keys=("destination", "nexthop")),
+                    arg("subnet_name"),
+                ],
+            },
         ],
     },
     {
@@ -929,6 +1069,17 @@ def _check_tables(problems):
                 "being recorded" % (key, target, actual))
 
 
+def _member_action(step, label, problems):
+    """The class a repeating step reads its multi-select from."""
+    targets = form_targets(step)
+    if len(targets) != 1:
+        problems.append(
+            "%s: a step with per= must name exactly one form, so %r can be "
+            "checked; it names %d" % (label, step["per"], len(targets)))
+        return None
+    return targets[0]
+
+
 def _check_member_field(step, label, problems):
     """Confirm a repeating step still knows what its list is called.
 
@@ -939,11 +1090,8 @@ def _check_member_field(step, label, problems):
     slug the method reads is a class attribute. That tracks upstream's naming
     rather than copying it: if the scheme changes, this says so.
     """
-    target = step.get("form")
-    if not target:
-        problems.append(
-            "%s: a step with per= names no form, so %r cannot be checked"
-            % (label, step["per"]))
+    target = _member_action(step, label, problems)
+    if target is None:
         return
     try:
         action = _load_form(target)
@@ -1012,18 +1160,16 @@ def validate():
     _check_tables(problems)
     for form in FORMS:
         _check_routes(form, problems)
-        target = form.get("form")
-        if not target:
+        if not form.get("form"):
             continue
         for step in specs(form):
             label = form["id"]
+            targets = form_targets(form)
             if step is not form:
                 label = "%s step %s" % (form["id"], cli_name(step["command"]))
                 if step.get("per"):
                     _check_member_field(step, label, problems)
-            targets = [target]
-            if step.get("form") and step is not form:
-                targets.append(step["form"])
+                targets = targets + form_targets(step)
             known = _known_fields(targets, label, problems)
             if known is not None:
                 _check_fields(step, label, known, problems)
@@ -1097,8 +1243,23 @@ def flags(spec):
                 found.append(field[key])
         for option in field.get("choices", {}).values():
             if option["flag"]:
-                found.append(option["flag"])
+                # A choice's flag may carry a fixed value; only the flag
+                # itself is something a parser has heard of.
+                found.append(option["flag"].split()[0])
     return found
+
+
+def form_targets(spec):
+    """The Horizon classes a rule or step was written against.
+
+    Usually one. A follow-up step that spans two action classes of a wizard
+    names both, because the submission merges them and neither alone holds
+    all the fields.
+    """
+    target = spec.get("form")
+    if not target:
+        return []
+    return [target] if isinstance(target, str) else list(target)
 
 
 def takes_positional(spec):

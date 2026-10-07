@@ -109,6 +109,29 @@ def _as_list(value):
     return list(value) if isinstance(value, (list, tuple)) else [value]
 
 
+def _split_lines(value):
+    """A textarea's lines, blank ones dropped, the way Horizon reads them."""
+    text = _scalar(value)
+    if _blank(text):
+        return []
+    return [line.strip() for line in str(text).splitlines() if line.strip()]
+
+
+def _gated(field, fields):
+    """Whether a field's ``when`` and ``unless`` conditions are met.
+
+    Checked before the kind is looked at, so the gate works the same on all
+    of them. See rules.only().
+    """
+    for name in field.get("when") or []:
+        if _blank(_scalar(fields.get(name))):
+            return False
+    for name in field.get("unless") or []:
+        if not _blank(_scalar(fields.get(name))):
+            return False
+    return True
+
+
 # ---------------------------------------------------------------- the rules
 
 
@@ -188,6 +211,69 @@ def _apply_value(field, raw, parts, body):
         _put(body, field["api"], value)
 
 
+def _apply_lines(field, raw, parts, body):
+    """A textarea read one value per line. See rules.lines()."""
+    values = _split_lines(raw)
+    for one in values:
+        parts += [field["flag"], shq(one)]
+    if values:
+        _put(body, field["api"], values)
+
+
+def _apply_pairs(field, raw, parts, body):
+    """A textarea read as named parts per line. See rules.pairs()."""
+    rows = []
+    for line in _split_lines(raw):
+        values = [bit.strip() for bit in line.split(",")]
+        spelled = ",".join("%s=%s" % (key, value)
+                           for key, value in zip(field["keys"], values))
+        parts += [field["flag"], shq(spelled)]
+        rows.append(dict(zip(field["apiKeys"], values)))
+    if rows:
+        _put(body, field["api"], rows)
+
+
+def _apply_multi(field, raw, parts, body):
+    """A multi-select, emitted as the flag once per value."""
+    values = [str(one) for one in _as_list(raw) if not _blank(one)]
+    for one in values:
+        parts += [field["flag"], shq(one)]
+    if values:
+        _put(body, field["api"], values)
+
+
+def _apply_choice(field, raw, parts, body):
+    """A select where each option is its own flag.
+
+    Anything not listed means "leave it to the server": Horizon's router
+    form offers centralized/distributed/server_default and sends the
+    "distributed" key only for the first two. Absence from the map is the
+    sentinel, so a rule does not have to name it.
+    """
+    picked = field["choices"].get(str(_scalar(raw)))
+    if picked is None:
+        return
+    if picked["flag"]:
+        # Split, because a flag may carry a fixed value: "--gateway none"
+        # is two words to a shell.
+        parts += picked["flag"].split()
+    _put(body, field["api"], picked["value"])
+
+
+def _apply_parent(field, raw, parts, body, creates):
+    """The resource the first call created. See rules.parent().
+
+    The command names it, by the name the operator typed. The body cannot,
+    so it gets the placeholder instead -- and it gets it whether or not a
+    name was supplied, because the resource is created either way.
+    """
+    name = _scalar(raw)
+    if not _blank(name):
+        parts += [field["flag"], shq(name)]
+    if creates:
+        _put(body, field["api"], creates)
+
+
 def _apply_boolean(field, raw, parts, body):
     """A checkbox: whichever side of it the rule names."""
     on = _checked(raw)
@@ -198,7 +284,7 @@ def _apply_boolean(field, raw, parts, body):
     _put(body, field["api"], on)
 
 
-def _render(spec, fields, captured, item=None):
+def _render(spec, fields, captured, item=None, creates=None):
     """One command line and one REST body, from one spec.
 
     A spec is a rule or one of its follow-up steps: the same shape, read the
@@ -217,6 +303,8 @@ def _render(spec, fields, captured, item=None):
     subject = ""
 
     for field in spec["fields"]:
+        if not _gated(field, fields):
+            continue
         raw = fields.get(field["field"])
         kind = field["kind"]
 
@@ -226,24 +314,20 @@ def _render(spec, fields, captured, item=None):
         elif kind == "flag":
             _apply_boolean(field, raw, parts, body)
 
+        elif kind == "lines":
+            _apply_lines(field, raw, parts, body)
+
+        elif kind == "pairs":
+            _apply_pairs(field, raw, parts, body)
+
+        elif kind == "parent":
+            _apply_parent(field, raw, parts, body, creates)
+
         elif kind == "choice":
-            # A select where each option is its own flag, and anything not
-            # listed means "leave it to the server": Horizon's router form
-            # offers centralized/distributed/server_default and sends the
-            # "distributed" key only for the first two. Absence from the map
-            # is the sentinel, so a rule does not have to name it.
-            picked = field["choices"].get(str(_scalar(raw)))
-            if picked is not None:
-                if picked["flag"]:
-                    parts.append(picked["flag"])
-                _put(body, field["api"], picked["value"])
+            _apply_choice(field, raw, parts, body)
 
         elif kind == "multi":
-            values = [str(one) for one in _as_list(raw) if not _blank(one)]
-            for one in values:
-                parts += [field["flag"], shq(one)]
-            if values:
-                _put(body, field["api"], values)
+            _apply_multi(field, raw, parts, body)
 
         elif kind == "redacted":
             # read_fields dropped the value before it reached us, so there is
@@ -309,7 +393,7 @@ def _follow_up(step, fields, captured, creates):
     for one in items:
         if per and _blank(one):
             continue
-        parts, body, _subject = _render(step, fields, captured, item=one)
+        parts, body, _subject = _render(step, fields, captured, one, creates)
         produced.append((" ".join(parts),
                          _call(step, body, captured, fields, one, creates)))
     return produced
@@ -328,7 +412,7 @@ def _apply_form(spec, fields, captured=None):
     """
     captured = captured or {}
     creates = spec.get("creates")
-    parts, body, subject = _render(spec, fields, captured)
+    parts, body, subject = _render(spec, fields, captured, creates=creates)
     commands = [" ".join(parts)]
     calls = [_call(spec, body, captured, fields, creates=creates)]
     for step in spec.get("then") or []:
