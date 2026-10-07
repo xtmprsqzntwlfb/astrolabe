@@ -580,13 +580,45 @@ class TestTranslate(unittest.TestCase):
         self.assertIs(body["admin_state_up"], False)
 
     def test_the_update_rule_does_not_poach_nested_update_urls(self):
-        # The networks panel also edits subnets and ports, both of them one
-        # path segment deeper. Matching those would build a network command
-        # against a subnet id.
+        # Both networks panels also edit subnets and ports, one path segment
+        # deeper. Matching those would build a network command against a
+        # subnet id.
         for path in ("/admin/networks/net-7/subnets/sub-1/update",
-                     "/admin/networks/net-7/ports/port-1/update"):
+                     "/admin/networks/net-7/ports/port-1/update",
+                     "/project/networks/net-7/subnets/sub-1/update",
+                     "/project/networks/net-7/ports/port-1/update"):
             with self.subTest(path):
                 self.assertIsNone(translate.translate(path, {"name": "x"}))
+
+    def test_a_project_network_edit_says_nothing_about_external(self):
+        # The reason these are two rules and not one. The project form has
+        # no external box, so there is no unticked box to read, and a save
+        # from this panel must not claim external routing was turned off.
+        out = translate.translate("/project/networks/net-7/update",
+                                  {"name": "quiet"})
+        self.assertEqual(
+            cli(out),
+            "openstack network set --name quiet --disable --no-share net-7")
+        body = out["calls"][0]["body"]["network"]
+        self.assertNotIn("router:external", body)
+        self.assertIs(body["shared"], False)
+
+    def test_both_network_edit_panels_render_their_own_fields(self):
+        submitted = {"name": "web", "admin_state": "on", "shared": "on"}
+        admin = translate.translate("/admin/networks/net-7/update/", submitted)
+        project = translate.translate("/project/networks/net-7/update",
+                                      submitted)
+        # Same panel, same intent, and the admin form carries one more box.
+        self.assertEqual(
+            cli(admin),
+            "openstack network set --name web --enable --share --internal "
+            "net-7")
+        self.assertEqual(
+            cli(project),
+            "openstack network set --name web --enable --share net-7")
+        for out in (admin, project):
+            self.assertEqual(out["calls"][0]["url"],
+                             "$OS_NETWORK_API/networks/net-7")
 
     def test_creating_and_updating_a_network_stay_separate(self):
         created = translate.translate("/admin/networks/create/",
@@ -1762,7 +1794,7 @@ class TestAgainstHorizon(unittest.TestCase):
         # worse than not matching. Matching is not enough; the capture has to
         # line up with the id the route was reversed with.
         rule = dict(next(one for one in rules.FORMS
-                         if one["id"] == "network-update"))
+                         if one["id"] == "network-update-admin"))
         rule["url"] = r"/(?P<id>admin)/networks/[^/]+/update/?$"
         original = rules.FORMS
         rules.FORMS = [rule]

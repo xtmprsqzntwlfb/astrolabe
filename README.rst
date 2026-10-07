@@ -138,7 +138,7 @@ Create user                    ``openstack user create``
 Create host aggregate          ``openstack aggregate create``
 Create router                  ``openstack router create``
 Edit volume type               ``openstack volume type set``
-Edit network (admin)           ``openstack network set``
+Edit network                   ``openstack network set``
 Edit project                   ``openstack project set``
 Edit domain                    ``openstack domain set``
 Edit group                     ``openstack group set``
@@ -210,13 +210,17 @@ and both router rules cover both dashboards, because the admin forms subclass
 the project ones and add nothing but a project selector on the create side and
 a redirect on the edit side.
 
-Networks are the case where that shortcut does not hold, on both sides. The
-admin create panel is a plain form; the project one is a multi-step workflow
-that creates a subnet alongside the network, under different field names, and
-it would be a separate rule producing more than one command. The two edit
-panels are separate classes too, and there the mismatch is worse than a gap:
-see Known limits. Neither project-side panel is covered, so an admin working
-on a network from the project dashboard gets nothing.
+Networks are the case where that shortcut does not hold, and they get two
+rules rather than one serving two dashboards. The edit forms are unrelated
+classes and the project one has no **External Network** box, so a single rule
+matching both paths would read that missing box as unticked and render
+``--internal``, announcing a change the operator never made. Two rules, each
+naming the fields its own form has, and neither saying anything about a field
+it does not offer.
+
+Creating is still admin-only. The project panel is a multi-step workflow that
+makes a subnet alongside the network, under entirely different field names;
+it needs a rule of its own. See Known limits.
 
 Endpoints and the token
 -----------------------
@@ -727,14 +731,6 @@ Known limits
 * **Network create is recorded from the admin panel only.** The project
   panel is a different form — a workflow that also creates a subnet — and
   needs a rule of its own. See "Which dashboard a panel lives in".
-* **Network edit is recorded from the admin panel only too**, and for a
-  different reason. The project form is a separate class carrying name,
-  admin state and shared, but no **External Network** box. On an edit
-  Horizon sends every one of those keys each time, so the rule emits both
-  sides of each checkbox — and a project-side submission, which never had an
-  external box to untick, would come out as ``--internal`` and claim the
-  operator turned external routing off. Missing a panel beats describing one
-  wrongly, so the rule stays pinned to ``/admin/``.
 * **A router created from the project dashboard records no owning project.**
   Only the admin form offers a project selector. From the project side Horizon
   uses whatever scope you are in, and there is no field to record, so the

@@ -324,16 +324,14 @@ FORMS = [
         ],
     },
     {
-        "id": "network-update",
+        "id": "network-update-admin",
         "title": "Update network",
-        # Admin only, unlike the router rule, which covers both dashboards.
-        # The project form is a separate class carrying name, admin_state and
-        # shared but not external. On a create an absent checkbox is just a
-        # default, but on an update Horizon sends all four keys every time, so
-        # the rule has to emit both sides of each -- and then a project-side
-        # submission, which never had an "external" box to untick, would
-        # render --internal and claim the operator turned external routing
-        # off. Missing a panel beats describing one wrongly. See Known limits.
+        # One of a pair, where the router rules are a single rule serving two
+        # dashboards. The two network edit forms are unrelated classes and
+        # the project one has no "External Network" box, so a rule matching
+        # both paths would read that missing box as unticked and render
+        # --internal, announcing a change the operator never made. Two rules
+        # instead, each naming the fields its own form has.
         "url": r"/admin/networks/(?P<id>[^/]+)/update/?$",
         "form": "openstack_dashboard.dashboards.admin.networks.forms"
                 ":UpdateNetwork",
@@ -353,6 +351,39 @@ FORMS = [
             boolean("shared", "shared", on="--share", off="--no-share"),
             boolean("external", "router:external",
                     on="--external", off="--internal"),
+            target(),
+        ],
+    },
+    {
+        "id": "network-update-project",
+        "title": "Update network",
+        # The other half of the pair. Three fields rather than four: this
+        # form offers no external box, so nothing here ever says anything
+        # about external routing, which is exactly the point of keeping the
+        # two apart.
+        "url": r"/project/networks/(?P<id>[^/]+)/update/?$",
+        "form": "openstack_dashboard.dashboards.project.networks.forms"
+                ":UpdateNetwork",
+        "routes": ["horizon:project:networks:update"],
+        "method": "PUT",
+        "endpoint": NETWORK + "/networks/{id}",
+        "envelope": "network",
+        "command": ["openstack", "network", "set"],
+        # Both sides of each box, for the reason the admin rule gives:
+        # handle() builds its params from every field on every save.
+        #
+        # shared is the one conditional field. handle() sends it only where
+        # the update_network:shared policy passes, because Neutron answers
+        # 403 otherwise. It passes for the admins Astrolabe records, who are
+        # the only people it records, so the rule maps it. For anyone else
+        # the form hides the widget rather than dropping it, and a hidden
+        # BooleanField posts "True" or "False", both of which read correctly
+        # here -- but no such submission is ever recorded to begin with.
+        "fields": [
+            opt("name", "--name"),
+            boolean("admin_state", "admin_state_up",
+                    on="--enable", off="--disable"),
+            boolean("shared", "shared", on="--share", off="--no-share"),
             target(),
         ],
     },
