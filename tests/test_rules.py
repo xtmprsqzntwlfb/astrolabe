@@ -60,7 +60,8 @@ from astrolabe import store  # noqa: E402
 from astrolabe import translate  # noqa: E402
 
 KINDS = {"value", "flag", "multi", "positional", "redacted",
-         "choice", "target", "item", "lines", "pairs", "parent"}
+         "choice", "target", "item", "lines", "pairs", "parent",
+         "captured"}
 
 
 def every_spec():
@@ -602,11 +603,17 @@ class TestTranslate(unittest.TestCase):
 
     def test_the_update_rule_does_not_poach_nested_update_urls(self):
         # Both networks panels also edit subnets and ports, one path segment
-        # deeper. Matching those would build a network command against a
-        # subnet id.
+        # deeper. A network rule matching those would build a network
+        # command against a subnet id. Subnets have a rule of their own now,
+        # so the test is that the right one claims them; ports have none, so
+        # nothing may claim those at all.
         for path in ("/admin/networks/net-7/subnets/sub-1/update",
-                     "/admin/networks/net-7/ports/port-1/update",
-                     "/project/networks/net-7/subnets/sub-1/update",
+                     "/project/networks/net-7/subnets/sub-1/update"):
+            with self.subTest(path):
+                out = translate.translate(path, {"subnet_name": "x"})
+                self.assertTrue(cli(out).startswith("openstack subnet set"),
+                                cli(out))
+        for path in ("/admin/networks/net-7/ports/port-1/update",
                      "/project/networks/net-7/ports/port-1/update"):
             with self.subTest(path):
                 self.assertIsNone(translate.translate(path, {"name": "x"}))
@@ -717,6 +724,71 @@ class TestTranslate(unittest.TestCase):
                                       {"net_name": "p", "admin_state": "on"})
         self.assertEqual(cli(admin), "openstack network create a")
         self.assertEqual(cli(project), "openstack network create p")
+
+    def test_a_subnet_is_created_inside_the_network_in_the_path(self):
+        # The network exists already, so unlike the wizard's subnet step
+        # there is a real id to use -- and it comes from the URL, because
+        # the form never submits it.
+        for dash in ("admin", "project"):
+            with self.subTest(dash):
+                out = translate.translate(
+                    "/%s/networks/net-1/subnets/create" % dash, {
+                        "subnet_name": "v4", "cidr": "10.0.0.0/24",
+                        "ip_version": "4", "gateway_ip": "10.0.0.1",
+                        "enable_dhcp": "on", "dns_nameservers": "8.8.8.8",
+                    })
+                self.assertEqual(
+                    cli(out),
+                    "openstack subnet create --network net-1 "
+                    "--subnet-range 10.0.0.0/24 --ip-version 4 "
+                    "--gateway 10.0.0.1 --dhcp --dns-nameserver 8.8.8.8 v4")
+                body = out["calls"][0]["body"]["subnet"]
+                self.assertEqual(body["network_id"], "net-1")
+                self.assertNotIn("$NEW_", json.dumps(out))
+
+    def test_emptying_a_subnet_list_on_an_edit_clears_it(self):
+        # Horizon sends dns_nameservers and host_routes as an empty list on
+        # every edit, so an empty box means remove them. The CLI spells that
+        # with a flag of its own rather than an empty value.
+        out = translate.translate(
+            "/project/networks/net-1/subnets/sub-9/update", {
+                "subnet_name": "v4", "enable_dhcp": "on",
+                "dns_nameservers": "", "host_routes": "",
+            })
+        self.assertEqual(
+            cli(out),
+            "openstack subnet set --name v4 --dhcp --no-dns-nameservers "
+            "--no-host-route sub-9")
+        body = out["calls"][0]["body"]["subnet"]
+        self.assertEqual(body["dns_nameservers"], [])
+        self.assertEqual(body["host_routes"], [])
+
+    def test_an_empty_allocation_pool_on_an_edit_says_nothing(self):
+        # The one list of the three Horizon sends only when set, so an empty
+        # box there is not a decision and must not read as one.
+        out = translate.translate(
+            "/admin/networks/net-1/subnets/sub-9/update",
+            {"subnet_name": "v4", "allocation_pools": ""})
+        self.assertNotIn("--allocation-pool", cli(out))
+        self.assertNotIn("allocation_pools",
+                         out["calls"][0]["body"]["subnet"])
+
+    def test_a_subnet_create_does_not_clear_what_was_never_there(self):
+        # The same two fields on the create rule carry no clear flag: a
+        # brand new subnet has no DNS servers to remove.
+        out = translate.translate("/project/networks/net-1/subnets/create",
+                                  {"subnet_name": "v4", "enable_dhcp": "on"})
+        self.assertEqual(
+            cli(out), "openstack subnet create --network net-1 --dhcp v4")
+
+    def test_a_subnet_edit_names_the_subnet_and_not_its_network(self):
+        out = translate.translate(
+            "/admin/networks/net-1/subnets/sub-9/update",
+            {"subnet_name": "v4", "enable_dhcp": "on"})
+        self.assertTrue(cli(out).endswith(" sub-9"), cli(out))
+        self.assertNotIn("net-1", cli(out))
+        self.assertEqual(out["calls"][0]["url"],
+                         "$OS_NETWORK_API/subnets/sub-9")
 
     def test_a_project_network_edit_says_nothing_about_external(self):
         # The reason these are two rules and not one. The project form has
@@ -2003,15 +2075,54 @@ class TestAgainstHorizon(unittest.TestCase):
         # validate() covers this, but a failure there names one rule among
         # many. This reports each panel separately.
         for form in rules.FORMS:
-            wants_id = "(?P<id>" in form["url"]
+            groups = rules._capture_groups(form["url"])
             for name in form["routes"]:
                 with self.subTest(form["id"], route=name):
-                    path, stand_in = rules._reverse_route(name, wants_id)
+                    path, stand_ins = rules._reverse_route(name, len(groups))
                     self.assertIsNotNone(path, "%s no longer reverses" % name)
                     self.assertRegex(path, form["url"])
-                    if stand_in is not None:
-                        match = re.search(form["url"], path)
-                        self.assertEqual(match.group("id"), stand_in)
+                    match = re.search(form["url"], path)
+                    for group, stand_in in zip(groups, stand_ins):
+                        self.assertEqual(match.group(group), stand_in,
+                                         "%s caught the wrong segment of %s"
+                                         % (group, path))
+
+    def test_a_rule_with_two_ids_reverses_and_aligns_both(self):
+        # Subnets are the first panel whose path carries two, and getting
+        # them the wrong way round would build a command against a network
+        # id. Named directly, so the sweep above cannot pass by never
+        # reaching a two-id rule.
+        form = next(one for one in rules.FORMS if one["id"] == "subnet-update")
+        groups = rules._capture_groups(form["url"])
+        self.assertEqual(groups, ["network", "id"])
+        for name in form["routes"]:
+            path, stand_ins = rules._reverse_route(name, 2)
+            self.assertEqual(len(set(stand_ins)), 2, "stand-ins must differ")
+            match = re.search(form["url"], path)
+            self.assertEqual(match.group("network"), stand_ins[0])
+            self.assertEqual(match.group("id"), stand_ins[1])
+
+    def test_uncovered_examines_a_rule_naming_several_forms(self):
+        # It used to load form["form"] straight, which raises on a list and
+        # was swallowed, so a rule spanning two action classes was skipped
+        # without a word -- in the one place a reviewer looks to see what a
+        # rule is choosing to ignore. Silence there reads as "nothing to
+        # see", which is the worst thing it could mean.
+        report = rules.uncovered()
+        self.assertIn("subnet-create", report)
+        self.assertIn("ipv6_modes", report["subnet-create"])
+
+    def test_uncovered_examines_a_follow_up_steps_own_form(self):
+        # The step's fields come from classes the rule never names, so
+        # nothing else would look at them.
+        self.assertIn("network-create-project step subnet_create",
+                      rules.uncovered())
+
+    def test_uncovered_does_not_report_a_field_a_step_reads(self):
+        # role_id is declared on the user form and consumed by the role_add
+        # step. A workflow posts flat, so which spec reads a field does not
+        # make it unread.
+        self.assertNotIn("role_id", rules.uncovered().get("user-create", []))
 
     def test_uncovered_fields_are_reported_for_review(self):
         # Not a failure: plenty of fields are deliberately unmapped. Printed

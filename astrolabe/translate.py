@@ -214,10 +214,25 @@ def _apply_value(field, raw, parts, body):
 def _apply_lines(field, raw, parts, body):
     """A textarea read one value per line. See rules.lines()."""
     values = _split_lines(raw)
+    if not values:
+        _apply_clear(field, parts, body)
+        return
     for one in values:
         parts += [field["flag"], shq(one)]
-    if values:
-        _put(body, field["api"], values)
+    _put(body, field["api"], values)
+
+
+def _apply_clear(field, parts, body):
+    """An emptied list field, where the rule says an empty one means clear.
+
+    Shared by the two list kinds. The CLI spells this with a flag of its
+    own rather than an empty value -- "--no-dns-nameservers" -- and Horizon
+    sends an empty list. A rule that did not ask for it emits nothing, the
+    way an empty box meant nothing before edit rules existed.
+    """
+    if field.get("clear"):
+        parts.append(field["clear"])
+        _put(body, field["api"], [])
 
 
 def _apply_pairs(field, raw, parts, body):
@@ -229,8 +244,10 @@ def _apply_pairs(field, raw, parts, body):
                            for key, value in zip(field["keys"], values))
         parts += [field["flag"], shq(spelled)]
         rows.append(dict(zip(field["apiKeys"], values)))
-    if rows:
-        _put(body, field["api"], rows)
+    if not rows:
+        _apply_clear(field, parts, body)
+        return
+    _put(body, field["api"], rows)
 
 
 def _apply_multi(field, raw, parts, body):
@@ -272,6 +289,19 @@ def _apply_parent(field, raw, parts, body, creates):
         parts += [field["flag"], shq(name)]
     if creates:
         _put(body, field["api"], creates)
+
+
+def _apply_captured(field, captured, parts, body):
+    """A resource named by the path rather than the form.
+
+    An attribute of the thing being made rather than its identity, so it
+    takes a flag and goes in the body. See rules.captured().
+    """
+    found = captured.get(field["field"])
+    if _blank(found):
+        return
+    parts += [field["flag"], shq(found)]
+    _put(body, field["api"], str(found))
 
 
 def _apply_boolean(field, raw, parts, body):
@@ -322,6 +352,9 @@ def _render(spec, fields, captured, item=None, creates=None):
 
         elif kind == "parent":
             _apply_parent(field, raw, parts, body, creates)
+
+        elif kind == "captured":
+            _apply_captured(field, captured, parts, body)
 
         elif kind == "choice":
             _apply_choice(field, raw, parts, body)

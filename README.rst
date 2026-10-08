@@ -138,7 +138,9 @@ Create user                    ``openstack user create``
 Create host aggregate          ``openstack aggregate create``
 Create router                  ``openstack router create``
 Edit volume type               ``openstack volume type set``
+Create subnet                  ``openstack subnet create``
 Edit network                   ``openstack network set``
+Edit subnet                    ``openstack subnet set``
 Edit project                   ``openstack project set``
 Edit domain                    ``openstack domain set``
 Edit group                     ``openstack group set``
@@ -458,7 +460,7 @@ Extending the rule table
 
 Adding a panel means adding one entry to ``FORMS`` in ``astrolabe/rules.py``.
 Nothing else changes. A rule names the URL it matches, the command and
-endpoint it maps to, and the fields it carries. Eleven field kinds cover
+endpoint it maps to, and the fields it carries. Twelve field kinds cover
 everything so far:
 
 ``opt(field, flag, api, cast, omit_when, absent_when, clearable)``
@@ -501,18 +503,29 @@ everything so far:
     is. Like ``target`` it names no form field, because the field it comes
     from holds the list rather than the value.
 
-``lines(field, flag, api)``
+``lines(field, flag, api, clear)``
     A textarea holding one value per line, emitted as the flag per line —
     a subnet's DNS servers. Blank lines are dropped, the way Horizon drops
-    them.
+    them. ``clear`` is the list version of ``opt``'s ``clearable``: the flag
+    that empties the list, for the edit forms where Horizon sends an empty
+    list rather than nothing. The CLI spells that with a flag of its own,
+    ``--no-dns-nameservers``, rather than with an empty value.
 
-``pairs(field, flag, api, keys, api_keys)``
+``pairs(field, flag, api, keys, api_keys, clear)``
     A textarea whose lines are comma-separated values with known names. An
     allocation pool is typed ``192.168.1.100,192.168.1.120``, reaches Neutron
     as ``{"start": …, "end": …}`` and the CLI as ``--allocation-pool
     start=…,end=…``. ``keys`` names the parts for the command and ``api_keys``
     for the body, because they do not always agree: a host route's second
     value is the ``gateway`` to the CLI and the ``nexthop`` to Neutron.
+
+``captured(group, flag, api)``
+    A value out of the URL, handed to the command as a flag. Not every id in
+    a path is the thing being changed: a subnet is created *inside* a network,
+    and the network is named by the path rather than by the form. ``target``
+    would make it the command's trailing argument, which is the subnet's
+    place; this passes it as a flag and writes it to the body, where it is an
+    attribute of the new subnet rather than its identity.
 
 ``parent(field, flag, api)``
     The resource the rule's first call created, as a follow-up step sees it —
@@ -759,7 +772,8 @@ Known limits
   them to what they already are, which is longer than it needs to be rather
   than wrong. Neither the password nor the domain is recorded: the password is
   changed on a panel of its own, and Keystone does not let a user move domain.
-* **A subnet's IPv6 mode is not recorded.** Horizon offers one menu whose
+* **A subnet's IPv6 mode is not recorded**, on any of the three panels
+  that offer it. Horizon offers one menu whose
   value it splits on ``/`` into an RA mode and an address mode, and sends
   only for an IPv6 subnet. Two flags out of one field, conditional on a
   second field, for a select that is "No options specified" by default: the
@@ -772,10 +786,15 @@ Known limits
   the router in whichever project your shell is scoped to at the time. Every
   other recorded command names what it acts on; this one does not. Add
   ``--project`` yourself if you will run it elsewhere.
-* **Create router does not record Enable SNAT.** Horizon sends it only when
-  a gateway network was chosen too, nested beside the network id, and a rule
-  cannot make one field depend on another. Unticking it is invisible here, so
-  add ``--disable-snat`` yourself if you meant it.
+* **Create router does not record Enable SNAT.** Not for want of a way to
+  say "only when a gateway network was chosen too" — ``only()`` does that.
+  The blocker is that Horizon *deletes* the checkbox where Neutron has no
+  ``ext-gw-mode`` extension, and a deleted checkbox posts exactly what an
+  unticked one posts: nothing at all. Emitting ``--disable-snat`` on that
+  evidence would announce a change the operator never made, on a cloud that
+  could not have made it. Recording only the ticked case would be safe and
+  would say nothing, SNAT on a gateway being the CLI default anyway. Add
+  ``--disable-snat`` yourself if you meant it.
 * **Editing a membership list is not recorded, anywhere.** This is the one
   thing follow-up steps do not solve, and the reason is not the number of
   calls. Changing the members of a project or a domain, the hosts of an

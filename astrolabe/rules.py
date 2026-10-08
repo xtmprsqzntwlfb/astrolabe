@@ -101,17 +101,25 @@ def repeated(field, flag, api):
     return {"kind": "multi", "field": field, "flag": flag, "api": api}
 
 
-def lines(field, flag, api):
+def lines(field, flag, api, clear=None):
     """A textarea holding one value per line, emitted as the flag per line.
 
     Horizon's subnet form collects DNS servers this way: a box the operator
     types into, read back with ``splitlines()``. Blank lines are dropped,
     the way Horizon drops them.
+
+    ``clear`` is the list version of :func:`opt`'s ``clearable``: the flag
+    that empties the list, for the edit forms where Horizon sends an empty
+    list rather than nothing. The CLI spells that with a flag of its own --
+    ``--no-dns-nameservers`` -- rather than with an empty value.
     """
-    return {"kind": "lines", "field": field, "flag": flag, "api": api}
+    return {
+        "kind": "lines", "field": field, "flag": flag, "api": api,
+        "clear": clear,
+    }
 
 
-def pairs(field, flag, api, keys, api_keys=None):
+def pairs(field, flag, api, keys, api_keys=None, clear=None):
     """A textarea whose lines are comma-separated values with known names.
 
     An allocation pool is typed as ``192.168.1.100,192.168.1.120`` and goes
@@ -128,7 +136,21 @@ def pairs(field, flag, api, keys, api_keys=None):
     return {
         "kind": "pairs", "field": field, "flag": flag, "api": api,
         "keys": list(keys), "apiKeys": list(api_keys or keys),
+        "clear": clear,
     }
+
+
+def captured(group, flag, api):
+    """A value out of the URL, handed to the command as a flag.
+
+    Not every id in a path is the thing being changed. A subnet is created
+    inside a network, and the network is named by the path rather than by
+    the form: ``/networks/<network_id>/subnets/create``. :func:`target`
+    would make it the command's trailing argument, which is the subnet's
+    place; this passes it as a flag and writes it to the body, where it is
+    an attribute of the new subnet rather than its identity.
+    """
+    return {"kind": "captured", "field": group, "flag": flag, "api": api}
 
 
 def parent(field, flag, api):
@@ -203,10 +225,10 @@ def item(api=None):
     return {"kind": "item", "field": None, "api": api}
 
 
-#: Kinds whose ``field`` does not name a form field: ``target`` names a URL
-#: capture group and ``item`` names nothing at all. validate() must not go
-#: looking for either in ``base_fields``.
-UNSUBMITTED = frozenset(["target", "item"])
+#: Kinds whose ``field`` does not name a form field: ``target`` and
+#: ``captured`` name URL capture groups, and ``item`` names nothing at all.
+#: validate() must not go looking for any of them in ``base_fields``.
+UNSUBMITTED = frozenset(["target", "item", "captured"])
 
 
 def specs(form):
@@ -495,6 +517,104 @@ FORMS = [
         ],
     },
     {
+        "id": "subnet-create",
+        "title": "Create subnet",
+        # Both dashboards: the admin workflow subclasses the project one and
+        # the project one subclasses the network wizard's step, so all three
+        # share these field names. Validating against the admin classes
+        # covers both, their base_fields being the superset.
+        "url": r"/(admin|project)/networks/(?P<network>[^/]+)"
+               r"/subnets/create/?$",
+        "form": [ADMIN + "networks.subnets.workflows:CreateSubnetInfoAction",
+                 PROJ + "networks.workflows:CreateSubnetDetailAction"],
+        "routes": [
+            "horizon:admin:networks:createsubnet",
+            "horizon:project:networks:createsubnet",
+        ],
+        "method": "POST",
+        "endpoint": NETWORK + "/subnets",
+        "envelope": "subnet",
+        "command": ["openstack", "subnet", "create"],
+        # The same fields the network wizard's subnet step carries, with one
+        # difference: the network already exists, so its id comes out of the
+        # path rather than standing in for something not created yet.
+        # Three unmapped, and uncovered() lists them. with_subnet is
+        # declared and hidden here, meaning nothing to a panel whose whole
+        # job is the subnet. address_source is the manual-or-pool switch
+        # that decides which of cidr and subnetpool the form shows; the
+        # rule reads the result rather than the switch. ipv6_modes is in
+        # Known limits.
+        "fields": [
+            captured("network", "--network", api="network_id"),
+            opt("cidr", "--subnet-range"),
+            opt("ip_version", "--ip-version", cast="int"),
+            opt("subnetpool", "--subnet-pool", api="subnetpool_id"),
+            only(opt("prefixlen", "--prefix-length", cast="int"),
+                 when=["subnetpool"]),
+            only(opt("gateway_ip", "--gateway"), unless=["no_gateway"]),
+            choice("no_gateway", "gateway_ip", {
+                "on": ("--gateway none", None),
+            }),
+            boolean("enable_dhcp", "enable_dhcp",
+                    on="--dhcp", off="--no-dhcp"),
+            lines("dns_nameservers", "--dns-nameserver", "dns_nameservers"),
+            pairs("allocation_pools", "--allocation-pool",
+                  "allocation_pools", ("start", "end")),
+            pairs("host_routes", "--host-route", "host_routes",
+                  ("destination", "gateway"),
+                  api_keys=("destination", "nexthop")),
+            arg("subnet_name"),
+        ],
+    },
+    {
+        "id": "subnet-update",
+        "title": "Update subnet",
+        "url": r"/(admin|project)/networks/(?P<network>[^/]+)"
+               r"/subnets/(?P<id>[^/]+)/update/?$",
+        "form": [ADMIN + "networks.subnets.workflows:UpdateSubnetInfoAction",
+                 PROJ + "networks.subnets.workflows:UpdateSubnetDetailAction"],
+        "routes": [
+            "horizon:admin:networks:editsubnet",
+            "horizon:project:networks:editsubnet",
+        ],
+        "method": "PUT",
+        "endpoint": NETWORK + "/subnets/{id}",
+        "envelope": "subnet",
+        "command": ["openstack", "subnet", "set"],
+        # cidr and ip_version are on the form and never sent: the first is
+        # rendered readonly and the second hidden, because Neutron will not
+        # change either. uncovered() lists them, along with the fields this
+        # workflow hides outright -- address_source, subnetpool, prefixlen,
+        # ipv6_modes -- and with_subnet, inherited from the create action
+        # and meaningless here.
+        #
+        # The network is in the path but takes no part: "subnet set" names
+        # the subnet, and the subnet cannot move between networks. Only the
+        # id is read, which is why this rule has a target and no captured.
+        "fields": [
+            opt("subnet_name", "--name", api="name"),
+            only(opt("gateway_ip", "--gateway"), unless=["no_gateway"]),
+            choice("no_gateway", "gateway_ip", {
+                "on": ("--gateway none", None),
+            }),
+            boolean("enable_dhcp", "enable_dhcp",
+                    on="--dhcp", off="--no-dhcp"),
+            # Horizon sends these two as an empty list on an edit whether or
+            # not anything was typed, so an empty box clears them. Allocation
+            # pools are the exception: that one it sends only when set, so
+            # emptying the box there says nothing and the rule says nothing.
+            lines("dns_nameservers", "--dns-nameserver", "dns_nameservers",
+                  clear="--no-dns-nameservers"),
+            pairs("host_routes", "--host-route", "host_routes",
+                  ("destination", "gateway"),
+                  api_keys=("destination", "nexthop"),
+                  clear="--no-host-route"),
+            pairs("allocation_pools", "--allocation-pool",
+                  "allocation_pools", ("start", "end")),
+            target(),
+        ],
+    },
+    {
         "id": "network-update-project",
         "title": "Update network",
         # The other half of the pair. Three fields rather than four: this
@@ -610,10 +730,16 @@ FORMS = [
         "endpoint": NETWORK + "/routers",
         "envelope": "router",
         "command": ["openstack", "router", "create"],
-        # enable_snat is deliberately unmapped. Horizon sends it only when a
-        # gateway network was also chosen, nested beside network_id, and a
-        # rule cannot make one field depend on another. Unticking it is
-        # therefore invisible here. See Known limits.
+        # enable_snat is deliberately unmapped, and uncovered() lists it.
+        # Not for want of a way to say "only alongside a gateway network":
+        # only() does exactly that. The blocker is a second one. Horizon
+        # deletes this field outright where Neutron has no ext-gw-mode
+        # extension, and a deleted checkbox posts what an unticked one
+        # posts, which is nothing. Emitting --disable-snat on that evidence
+        # would announce a change the operator never made, on a cloud that
+        # could not have made it. The ticked case is safe and says only what
+        # the CLI already defaults to. See Known limits, and redacted() for
+        # the same trap.
         "fields": [
             opt("tenant_id", "--project"),
             # Defaults to up; absence means the operator unticked it.
@@ -995,24 +1121,41 @@ def _load_form(target):
     return getattr(import_module(module_name), class_name)
 
 
-#: Stood into an edit panel's URL when reversing it. Two of them because
-#: Horizon's id patterns are usually ``[^/]+`` but occasionally numeric, and
-#: a placeholder the pattern rejects would look exactly like a moved panel.
-_STAND_INS = ("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9", "1")
+def _stand_ins(count):
+    """Placeholders to reverse a panel's URL with, one per capture group.
+
+    Distinct from each other, so a group that caught the wrong segment of
+    the path is visible rather than coincidentally right. Two sets, because
+    Horizon's id patterns are usually ``[^/]+`` but occasionally numeric,
+    and a placeholder the pattern rejects would look exactly like a panel
+    that moved.
+    """
+    return [
+        tuple("%08x-0000-4000-8000-%012x" % (n + 1, n + 1)
+              for n in range(count)),
+        tuple(str(n + 1) for n in range(count)),
+    ]
 
 
-def _reverse_route(name, wants_id):
-    """The path a URL name resolves to, or None if it no longer resolves."""
+def _reverse_route(name, count):
+    """The path a URL name resolves to, and the ids it was reversed with.
+
+    ``(None, ())`` if it no longer resolves at all.
+    """
     from django.urls import NoReverseMatch
     from django.urls import reverse
 
-    attempts = [(stand_in,) for stand_in in _STAND_INS] if wants_id else [()]
-    for args in attempts:
+    for args in _stand_ins(count) if count else [()]:
         try:
-            return reverse(name, args=args), (args[0] if args else None)
+            return reverse(name, args=args), args
         except NoReverseMatch:
             continue
-    return None, None
+    return None, ()
+
+
+def _capture_groups(pattern):
+    """The named groups a rule's url pattern declares, in path order."""
+    return re.findall(r"\(\?P<(\w+)>", pattern)
 
 
 def _check_routes(form, problems):
@@ -1026,15 +1169,20 @@ def _check_routes(form, problems):
     Reversing the URL name rather than hard-coding a path is the point: the
     name is Horizon's stable handle, the path is the thing allowed to move.
 
-    An edit panel's URL takes the resource id, so it is reversed with a
-    stand-in, and the rule's capture group is then checked to have caught that
-    stand-in and not some other segment. A pattern that matches the path while
-    capturing the wrong part of it builds a command against the wrong
-    resource, which is a worse outcome than not matching at all.
+    A panel whose path carries ids is reversed with stand-ins, one per group
+    the rule declares, and each group is then checked to have caught its own.
+    A pattern that matches the path while capturing the wrong part of it
+    builds a command against the wrong resource, which is a worse outcome
+    than not matching at all.
+
+    The groups are paired with the stand-ins in path order, which holds
+    because a rule names every variable segment of the path it matches. One
+    that named only some would report here rather than pass quietly, which
+    is the right direction for the mistake to fail in.
     """
-    wants_id = "(?P<id>" in form["url"]
+    groups = _capture_groups(form["url"])
     for name in form["routes"]:
-        path, stand_in = _reverse_route(name, wants_id)
+        path, stand_ins = _reverse_route(name, len(groups))
         if path is None:
             problems.append(
                 "%s: %s no longer reverses; the rule cannot fire"
@@ -1045,11 +1193,14 @@ def _check_routes(form, problems):
             problems.append(
                 "%s: %s is now %s, which %r does not match"
                 % (form["id"], name, path, form["url"]))
-        elif stand_in is not None and match.groupdict().get("id") != stand_in:
-            problems.append(
-                "%s: %s is now %s, where %r captures %r as the id rather "
-                "than the resource" % (form["id"], name, path, form["url"],
-                                       match.groupdict().get("id")))
+            continue
+        for group, stand_in in zip(groups, stand_ins):
+            if match.group(group) != stand_in:
+                problems.append(
+                    "%s: %s is now %s, where %r captures %r as %s rather "
+                    "than the resource" % (form["id"], name, path,
+                                           form["url"], match.group(group),
+                                           group))
 
 
 def _check_tables(problems):
@@ -1180,24 +1331,43 @@ def uncovered():
     """Form fields no rule mentions, keyed by rule id.
 
     Informational rather than a problem: plenty of fields are deliberately
-    unmapped (Horizon's ``with_subnet`` branches into a second form, for
-    instance). Useful when reviewing a rule after a Horizon upgrade.
+    unmapped (Horizon's ``with_subnet`` decides whether a second call
+    happens rather than describing anything). Useful when reviewing a rule
+    after a Horizon upgrade.
+
+    A follow-up step's own form is examined too, under a key of its own.
+    What a workflow posts is flat, but which class a field came from is
+    still the thing a reviewer wants to see.
     """
     report = {}
     for form in FORMS:
-        target = form.get("form")
-        if not target:
+        if not form.get("form"):
             continue
-        try:
-            form_class = _load_form(target)
-        except Exception:  # noqa: BLE001 - validate() reports this properly
-            continue
-        mapped = {field["field"] for spec in specs(form)
-                  for field in spec["fields"]
-                  if field["kind"] not in UNSUBMITTED}
-        missing = sorted(set(getattr(form_class, "base_fields", {})) - mapped)
-        if missing:
-            report[form["id"]] = missing
+        for spec in specs(form):
+            label = form["id"]
+            targets = form_targets(form)
+            if spec is not form:
+                label = "%s step %s" % (form["id"], cli_name(spec["command"]))
+                targets = form_targets(spec)
+                if not targets:
+                    continue
+            known = set()
+            try:
+                for target in targets:
+                    known |= set(getattr(_load_form(target),
+                                         "base_fields", {}))
+            except Exception:  # noqa: BLE001 - validate() reports this
+                continue
+            # Read across every spec, not just this one. A workflow posts
+            # its steps as one flat submission, so a field declared on this
+            # class may well be consumed by a different step -- the user
+            # form's role_id is read by the role_add step, not by the rule.
+            mapped = {field["field"] for one in specs(form)
+                      for field in one["fields"]
+                      if field["kind"] not in UNSUBMITTED}
+            missing = sorted(known - mapped)
+            if missing:
+                report[label] = missing
     return report
 
 
@@ -1238,7 +1408,7 @@ def flags(spec):
     """
     found = []
     for field in spec["fields"]:
-        for key in ("flag", "on", "off"):
+        for key in ("flag", "on", "off", "clear"):
             if field.get(key):
                 found.append(field[key])
         for option in field.get("choices", {}).values():
