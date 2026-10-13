@@ -137,8 +137,11 @@ Create role                    ``openstack role create``
 Create user                    ``openstack user create``
 Create host aggregate          ``openstack aggregate create``
 Create router                  ``openstack router create``
-Edit volume type               ``openstack volume type set``
 Create subnet                  ``openstack subnet create``
+Create security group          ``openstack security group create``
+Allocate floating IP           ``openstack floating ip create``
+Associate floating IP          ``openstack floating ip set --port``
+Edit volume type               ``openstack volume type set``
 Edit network                   ``openstack network set``
 Edit subnet                    ``openstack subnet set``
 Edit project                   ``openstack project set``
@@ -148,6 +151,7 @@ Edit role                      ``openstack role set``
 Edit user                      ``openstack user set``
 Edit host aggregate            ``openstack aggregate set``
 Edit router                    ``openstack router set``
+Edit security group            ``openstack security group set``
 Delete, on any of the above    ``openstack <resource> delete``
 ============================== ====================================
 
@@ -157,7 +161,9 @@ nothing about the flavor itself. See Known limits.
 
 Deletes are handled by one generic rule that decodes Horizon's
 ``<table>__<action>__<id>`` action encoding, so row actions and multi-select
-batch deletes both work.
+batch deletes both work. A table says which word its own panel uses, because
+Horizon does not always say delete: a floating IP is *released*. The rendered
+command says ``delete`` regardless, that being what the CLI calls it.
 
 Two of these take more than one call, and come out as more than one command
 under a single heading, because they were a single thing the operator did.
@@ -207,18 +213,25 @@ delete.
 Creates and edits are matched by URL, one rule at a time, so each rule has to
 say which dashboards it covers. Most of them need only one: flavors, volume
 types and host aggregates exist solely in the admin dashboard, and projects,
-domains, groups, roles and users solely in identity. Routers are the exception
-and both router rules cover both dashboards, because the admin forms subclass
-the project ones and add nothing but a project selector on the create side and
-a redirect on the edit side.
+domains, groups, roles and users solely in identity. Routers and subnets each
+get one rule serving both, because their admin forms subclass the project ones
+and add almost nothing.
 
-Networks are the case where that shortcut does not hold, and they get two
-rules rather than one serving two dashboards. The edit forms are unrelated
-classes and the project one has no **External Network** box, so a single rule
-matching both paths would read that missing box as unticked and render
-``--internal``, announcing a change the operator never made. Two rules, each
-naming the fields its own form has, and neither saying anything about a field
-it does not offer.
+Floating IP allocation is served by one rule too, and it is the interesting
+case, because the two forms there are *unrelated* classes: the admin one has a
+project selector, the project one has DNS fields, and neither inherits from
+the other. One rule still covers both, because every field on them is a value
+behind a flag. A field the other form does not have is simply not submitted,
+and an unsubmitted value is skipped. What makes a shared rule unsafe is a
+checkbox, not a difference in fields.
+
+Networks are where that does not hold, and they get two rules apiece. The
+edit forms are unrelated classes, as the floating IP ones are, but here one of
+the differing fields is the **External Network** box. A single rule matching
+both paths would read that missing box as unticked and render ``--internal``,
+announcing a change the operator never made. An absent value says nothing; an
+absent checkbox says "off". Two rules, each naming the fields its own form
+has, and neither saying anything about a field it does not offer.
 
 Creating takes two rules for the same reason, and the project one is the
 wizard: a single submission makes the network and, if **Create Subnet** is
@@ -779,13 +792,13 @@ Known limits
   second field, for a select that is "No options specified" by default: the
   machinery costs more than the field is worth. Add ``--ipv6-ra-mode`` and
   ``--ipv6-address-mode`` yourself if you set it.
-* **A router created from the project dashboard records no owning project.**
-  Only the admin form offers a project selector. From the project side Horizon
-  uses whatever scope you are in, and there is no field to record, so the
-  command comes out as a bare ``openstack router create <name>`` and creates
-  the router in whichever project your shell is scoped to at the time. Every
-  other recorded command names what it acts on; this one does not. Add
-  ``--project`` yourself if you will run it elsewhere.
+* **Created from the project dashboard, a router or a floating IP records no
+  owning project.** Only the admin forms offer a project selector. From the
+  project side Horizon uses whatever scope you are in, and there is no field
+  to record, so the command comes out bare and acts on whichever project your
+  shell is scoped to at the time. Every other recorded command names what it
+  acts on; these do not. Add ``--project`` yourself if you will run them
+  elsewhere.
 * **Create router does not record Enable SNAT.** Not for want of a way to
   say "only when a gateway network was chosen too" — ``only()`` does that.
   The blocker is that Horizon *deletes* the checkbox where Neutron has no

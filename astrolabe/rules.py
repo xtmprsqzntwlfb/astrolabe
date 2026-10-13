@@ -517,6 +517,96 @@ FORMS = [
         ],
     },
     {
+        "id": "floating-ip-allocate",
+        "title": "Allocate floating IP",
+        # Both dashboards off one rule, and here that is safe in a way it
+        # was not for network edit: every field is a value behind a flag,
+        # so one the other form does not have is simply not submitted and
+        # is skipped. It takes a checkbox to turn an absent field into a
+        # statement, and there are none.
+        "url": r"/(admin|project)/floating_ips/allocate/?$",
+        # Two unrelated classes, not a subclass pair. Between them they
+        # declare every field below, which is what validate() checks.
+        "form": [PROJ + "floating_ips.forms:FloatingIpAllocate",
+                 ADMIN + "floating_ips.forms:AdminFloatingIpAllocate"],
+        "routes": [
+            "horizon:admin:floating_ips:allocate",
+            "horizon:project:floating_ips:allocate",
+        ],
+        "method": "POST",
+        "endpoint": NETWORK + "/floatingips",
+        "envelope": "floatingip",
+        "command": ["openstack", "floating", "ip", "create"],
+        # tenant is the admin form's alone; dns_domain and dns_name are the
+        # project form's, and Horizon drops those too where Neutron has no
+        # dns-integration extension. A project-side allocation names no
+        # project, as a project-side router names none. See Known limits.
+        "fields": [
+            opt("tenant", "--project", api="tenant_id"),
+            opt("floating_ip_address", "--floating-ip-address"),
+            opt("description", "--description"),
+            opt("dns_domain", "--dns-domain"),
+            opt("dns_name", "--dns-name"),
+            arg("pool", api="floating_network_id"),
+        ],
+    },
+    {
+        "id": "floating-ip-associate",
+        "title": "Associate floating IP",
+        "url": r"/project/floating_ips/associate/?$",
+        "form": PROJ + "floating_ips.workflows:AssociateIPAction",
+        "routes": ["horizon:project:floating_ips:associate"],
+        "method": "PUT",
+        # The only rule so far whose path id comes from the submission
+        # rather than from the URL: this panel is reached without one, and
+        # the floating IP is chosen on the form.
+        "endpoint": NETWORK + "/floatingips/{ip_id}",
+        "envelope": "floatingip",
+        "command": ["openstack", "floating", "ip", "set"],
+        # instance_id is unmapped, and uncovered() lists it. It is how the
+        # page remembers which instance the operator came from; the
+        # association is to a port, and port_id carries that.
+        "fields": [
+            opt("port_id", "--port"),
+            arg("ip_id", api=None),
+        ],
+    },
+    {
+        "id": "security-group-create",
+        "title": "Create security group",
+        "url": r"/project/security_groups/create/?$",
+        "form": PROJ + "security_groups.forms:CreateGroup",
+        "routes": ["horizon:project:security_groups:create"],
+        "method": "POST",
+        "endpoint": NETWORK + "/security-groups",
+        "envelope": "security_group",
+        "command": ["openstack", "security", "group", "create"],
+        "fields": [
+            opt("description", "--description"),
+            arg("name"),
+        ],
+    },
+    {
+        "id": "security-group-update",
+        "title": "Update security group",
+        "url": r"/project/security_groups/(?P<id>[^/]+)/update/?$",
+        "form": PROJ + "security_groups.forms:UpdateGroup",
+        "routes": ["horizon:project:security_groups:update"],
+        "method": "PUT",
+        "endpoint": NETWORK + "/security-groups/{id}",
+        "envelope": "security_group",
+        "command": ["openstack", "security", "group", "set"],
+        # The hidden id is submitted as well and uncovered() lists it; the
+        # path is where this rule reads it from, as on every other edit.
+        # security_group_update passes the description every time, so an
+        # emptied box clears it.
+        "fields": [
+            opt("name", "--name"),
+            opt("description", "--description", clearable=True),
+            target(),
+        ],
+    },
+    {
         "id": "subnet-create",
         "title": "Create subnet",
         # Both dashboards: the admin workflow subclasses the project one and
@@ -1109,6 +1199,18 @@ TABLES = {
     "users": {
         "noun": "user", "path": IDENTITY + "/users",
         "table": IDENT + "users.tables:UsersTable",
+    },
+    "security_groups": {
+        "noun": "security group", "path": NETWORK + "/security-groups",
+        "table": PROJ + "security_groups.tables:SecurityGroupsTable",
+    },
+    # Horizon calls this one release rather than delete, so the action
+    # arrives as "floating_ips__release". The CLI calls it delete, which is
+    # what gets rendered.
+    "floating_ips": {
+        "noun": "floating ip", "path": NETWORK + "/floatingips",
+        "action": "release",
+        "table": PROJ + "floating_ips.tables:FloatingIPsTable",
     },
 }
 

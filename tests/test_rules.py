@@ -725,6 +725,83 @@ class TestTranslate(unittest.TestCase):
         self.assertEqual(cli(admin), "openstack network create a")
         self.assertEqual(cli(project), "openstack network create p")
 
+    def test_both_floating_ip_panels_share_one_rule(self):
+        # They can, where the network edit panels could not, because every
+        # field here is a value behind a flag. A field the other form does
+        # not have is simply absent, and absent is skipped. It takes a
+        # checkbox to turn an absent field into a statement.
+        project = translate.translate("/project/floating_ips/allocate", {
+            "pool": "ext-net", "floating_ip_address": "203.0.113.9",
+            "description": "web vip", "dns_name": "web",
+        })
+        self.assertEqual(
+            cli(project),
+            "openstack floating ip create "
+            "--floating-ip-address 203.0.113.9 --description 'web vip' "
+            "--dns-name web ext-net")
+        admin = translate.translate("/admin/floating_ips/allocate", {
+            "pool": "ext-net", "tenant": "p-1", "description": "for ops",
+        })
+        self.assertEqual(
+            cli(admin),
+            "openstack floating ip create --project p-1 "
+            "--description 'for ops' ext-net")
+        # Neither submission picks up a flag for a field the other owns.
+        self.assertNotIn("--project", cli(project))
+        self.assertNotIn("--dns-name", cli(admin))
+
+    def test_associating_a_floating_ip_reads_its_id_from_the_form(self):
+        # Every other edit takes the id from the path. This panel is
+        # reached without one: the floating IP is picked on the form.
+        out = translate.translate("/project/floating_ips/associate", {
+            "ip_id": "fip-1", "port_id": "port-7", "instance_id": "i-3",
+        })
+        self.assertEqual(cli(out), "openstack floating ip set --port port-7 "
+                                   "fip-1")
+        self.assertEqual(out["calls"][0]["url"],
+                         "$OS_NETWORK_API/floatingips/fip-1")
+        self.assertEqual(out["calls"][0]["body"]["floatingip"],
+                         {"port_id": "port-7"})
+
+    def test_security_groups_create_and_update(self):
+        created = translate.translate("/project/security_groups/create",
+                                      {"name": "web",
+                                       "description": "web tier"})
+        self.assertEqual(
+            cli(created),
+            "openstack security group create --description 'web tier' web")
+        updated = translate.translate(
+            "/project/security_groups/sg-1/update",
+            {"name": "web", "description": ""})
+        self.assertEqual(
+            cli(updated),
+            "openstack security group set --name web --description '' sg-1")
+        self.assertEqual(
+            updated["calls"][0]["url"],
+            "$OS_NETWORK_API/security-groups/sg-1")
+
+    def test_releasing_a_floating_ip_is_recorded_as_a_delete(self):
+        # Horizon calls it release and the action arrives as
+        # "floating_ips__release", so the generic rule has to know that
+        # word. What it renders is delete, which is what the CLI calls it.
+        out = translate.translate("/project/floating_ips/", {
+            "action": "floating_ips__release", "object_ids": ["f1", "f2"],
+        })
+        self.assertEqual(cli(out), "openstack floating ip delete f1 f2")
+        self.assertEqual(len(out["calls"]), 2)
+        self.assertTrue(out["calls"][0]["url"].endswith("/floatingips/f1"))
+
+    def test_a_table_only_answers_to_its_own_removal_word(self):
+        # Security groups are deleted, not released, and the two must not
+        # be interchangeable: a word a panel does not use is a word nothing
+        # should be recorded under.
+        self.assertIsNone(translate.translate(
+            "/project/security_groups/",
+            {"action": "security_groups__release", "object_ids": ["sg-1"]}))
+        self.assertIsNone(translate.translate(
+            "/project/floating_ips/",
+            {"action": "floating_ips__delete", "object_ids": ["f1"]}))
+
     def test_a_subnet_is_created_inside_the_network_in_the_path(self):
         # The network exists already, so unlike the wizard's subnet step
         # there is a real id to use -- and it comes from the URL, because

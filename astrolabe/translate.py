@@ -38,7 +38,7 @@ SECRET_WORD = re.compile(r"(^|_)(pass|key|auth)(_|$)", re.I)
 
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])")
 _SAFE_WORD = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
-_DELETE_ACTION = re.compile(r"^[a-z0-9_]+__delete(__|$)")
+_TABLE_ACTION = re.compile(r"^[a-z0-9_]+__[a-z0-9_]+(__|$)")
 
 
 def is_secret(name):
@@ -461,10 +461,18 @@ def _apply_form(spec, fields, captured=None):
 
 
 def _apply_delete(fields):
-    """Apply the table-delete rule, if the action names a known table."""
+    """Apply the table-delete rule, if the action names a known table.
+
+    Horizon does not always call removal "delete". Floating IPs are
+    *released*, and the action arrives as "floating_ips__release", so a
+    table says which word its own panel uses. The rendered command still
+    says delete, because that is what the CLI calls it.
+    """
     bits = str(_scalar(fields.get("action")) or "").split("__")
     table = rules.TABLES.get(bits[0])
     if not table:
+        return None
+    if len(bits) < 2 or bits[1] != table.get("action", "delete"):
         return None
     # A row action carries the id in the third segment; a batch action puts
     # the selected ids in repeated object_ids fields.
@@ -505,7 +513,7 @@ def translate(url, fields):
         if match:
             return _apply_form(form, fields, match.groupdict())
     action = _scalar(fields.get("action"))
-    if isinstance(action, str) and _DELETE_ACTION.match(action):
+    if isinstance(action, str) and _TABLE_ACTION.match(action):
         return _apply_delete(fields)
     return None
 
