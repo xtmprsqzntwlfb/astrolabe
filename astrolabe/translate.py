@@ -377,7 +377,10 @@ def _render(spec, fields, captured, item=None, creates=None):
             # rather than describing this one. See rules.arg().
             if field["api"]:
                 _put(body, field["api"], str(raw))
-            subject = str(raw)
+            # The first thing a command names is what the entry is about:
+            # the flavor in "flavor create", the router in "router add
+            # subnet". Later positionals qualify it rather than replace it.
+            subject = subject or str(raw)
 
         elif kind == "target":
             # Not from the submission: see rules.target(). It trails the
@@ -387,7 +390,7 @@ def _render(spec, fields, captured, item=None, creates=None):
             if _blank(found):
                 continue
             trailing.append(shq(found))
-            subject = str(found)
+            subject = subject or str(found)
 
         elif kind == "item":
             # Whichever value of the step's ``per`` list this pass is on.
@@ -401,12 +404,24 @@ def _render(spec, fields, captured, item=None, creates=None):
 
 
 def _call(spec, body, captured, fields, item=None, creates=None):
-    """One REST call. A spec with no envelope sends no body at all."""
+    """One REST call.
+
+    Three shapes of body, and the envelope says which. A name wraps the
+    body in it, as nearly every call does. rules.FLAT sends the body bare,
+    which is what Neutron's add_router_interface takes. None sends no body
+    at all, which is how Keystone grants a role.
+    """
     envelope = spec.get("envelope")
+    if envelope is None:
+        sent = None
+    elif envelope == rules.FLAT:
+        sent = body
+    else:
+        sent = {envelope: body}
     return {
         "method": spec["method"],
         "url": _endpoint(spec, captured, fields, item, creates),
-        "body": {envelope: body} if envelope else None,
+        "body": sent,
     }
 
 
@@ -506,11 +521,27 @@ def _pattern(expression):
     return re.compile(expression)
 
 
+def _rule_applies(form, fields):
+    """Whether a rule will own this submission, or stand aside.
+
+    A panel sometimes does a different thing depending on what was filled
+    in, and not every branch is one a rule can describe. Horizon's add
+    interface form calls one API with a subnet and a different one, on a
+    resource it makes along the way, when an address is typed too. Saying
+    nothing there is right; rendering the subnet command for it would
+    describe an action that did not happen. See rules.FORMS.
+    """
+    for name in form.get("unless") or []:
+        if not _blank(_scalar(fields.get(name))):
+            return False
+    return True
+
+
 def translate(url, fields):
     """Translate a submission, or return None if no rule claims it."""
     for form in rules.FORMS:
         match = _pattern(form["url"]).search(url)
-        if match:
+        if match and _rule_applies(form, fields):
             return _apply_form(form, fields, match.groupdict())
     action = _scalar(fields.get("action"))
     if isinstance(action, str) and _TABLE_ACTION.match(action):

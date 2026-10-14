@@ -168,20 +168,36 @@ class TestRuleSet(unittest.TestCase):
             with self.subTest(form["id"], field=field["field"]):
                 self.assertIn(field["kind"], KINDS)
 
-    def test_each_form_has_exactly_one_trailing_argument(self):
-        # The interpreter appends these last; more than one would make
-        # argument order depend on rule order, which is too subtle to allow.
-        # A create names its subject (positional), an edit names the resource
-        # it is editing (target), and no rule does both.
-        #
-        # Follow-up steps are the exception, and have a test of their own:
-        # "aggregate add host" takes two, and which is which is the order
-        # they are written in.
+    #: Rules whose command takes more than one trailing argument, where the
+    #: order they are written in is the order the CLI reads them. Listed so
+    #: that a second one appearing on some other rule is a deliberate act
+    #: rather than something that slipped in.
+    ORDERED_ARGUMENTS = {"router-add-interface"}
+
+    def test_a_rule_names_what_it_acts_on(self):
+        # The interpreter appends these last. One is the usual shape: a
+        # create names its subject (positional), an edit names the resource
+        # it is editing (target). Where there are two, argument order stops
+        # being incidental and starts being load-bearing, so those rules are
+        # named above rather than discovered.
         for form in rules.FORMS:
             trailing = [f for f in form["fields"]
                         if f["kind"] in ("positional", "target")]
             with self.subTest(form["id"]):
-                self.assertEqual(len(trailing), 1)
+                self.assertTrue(trailing, "the command names no resource")
+                if len(trailing) > 1:
+                    self.assertIn(form["id"], self.ORDERED_ARGUMENTS)
+                else:
+                    self.assertNotIn(form["id"], self.ORDERED_ARGUMENTS)
+
+    def test_the_first_trailing_argument_is_what_the_entry_is_about(self):
+        # "router add subnet <router> <subnet>" is about the router, and
+        # the title has to say so. The interpreter takes the first, which
+        # is only right because the CLI puts the subject first too.
+        out = translate.translate("/project/routers/r-1/addinterface",
+                                  {"subnet_id": "sub-3"})
+        self.assertEqual(cli(out), "openstack router add subnet r-1 sub-3")
+        self.assertEqual(out["title"], "Add interface to router r-1")
 
     def test_a_rule_captures_an_id_exactly_when_it_needs_one(self):
         # The id reaches the command through a target field and the REST path
@@ -724,6 +740,40 @@ class TestTranslate(unittest.TestCase):
                                       {"net_name": "p", "admin_state": "on"})
         self.assertEqual(cli(admin), "openstack network create a")
         self.assertEqual(cli(project), "openstack network create p")
+
+    def test_setting_a_router_gateway_nests_the_network(self):
+        out = translate.translate("/project/routers/r-1/setgateway",
+                                  {"network_id": "ext-net"})
+        self.assertEqual(
+            cli(out),
+            "openstack router set --external-gateway ext-net r-1")
+        self.assertEqual(out["calls"][0]["body"]["router"],
+                         {"external_gateway_info": {"network_id": "ext-net"}})
+
+    def test_adding_an_interface_sends_a_body_with_no_wrapper(self):
+        # The one call Neutron takes bare. Wrapping it in "router", as
+        # every other call here is wrapped, would be a different request.
+        out = translate.translate("/project/routers/r-1/addinterface",
+                                  {"subnet_id": "sub-3"})
+        call = out["calls"][0]
+        self.assertEqual(call["url"],
+                         "$OS_NETWORK_API/routers/r-1/add_router_interface")
+        self.assertEqual(call["body"], {"subnet_id": "sub-3"})
+
+    def test_a_rule_stands_aside_for_a_branch_it_cannot_describe(self):
+        # With an address typed in, Horizon creates a port and attaches
+        # that instead, and neither the port's network nor its name is
+        # submitted. Recording "router add subnet" for it would describe an
+        # action that did not happen, so the rule declines the submission.
+        out = translate.translate("/project/routers/r-1/addinterface",
+                                  {"subnet_id": "sub-3",
+                                   "ip_address": "10.0.0.9"})
+        self.assertIsNone(out)
+        # And an empty box is not a typed address: that is the plain case.
+        plain = translate.translate("/project/routers/r-1/addinterface",
+                                    {"subnet_id": "sub-3",
+                                     "ip_address": ""})
+        self.assertEqual(cli(plain), "openstack router add subnet r-1 sub-3")
 
     def test_both_floating_ip_panels_share_one_rule(self):
         # They can, where the network edit panels could not, because every

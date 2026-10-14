@@ -139,6 +139,7 @@ Create host aggregate          ``openstack aggregate create``
 Create router                  ``openstack router create``
 Create subnet                  ``openstack subnet create``
 Create security group          ``openstack security group create``
+Add interface to router        ``openstack router add subnet``
 Allocate floating IP           ``openstack floating ip create``
 Associate floating IP          ``openstack floating ip set --port``
 Edit volume type               ``openstack volume type set``
@@ -152,6 +153,7 @@ Edit user                      ``openstack user set``
 Edit host aggregate            ``openstack aggregate set``
 Edit router                    ``openstack router set``
 Edit security group            ``openstack security group set``
+Set router gateway             ``openstack router set --external-gateway``
 Delete, on any of the above    ``openstack <resource> delete``
 ============================== ====================================
 
@@ -584,6 +586,21 @@ list of them, where one step spans two, as the project subnet step does. A
 workflow posts every step at once, so any of those classes' fields may turn up
 in the submission and ``validate()`` accepts them all.
 
+A rule may also carry ``unless``: field names that make it stand aside
+entirely. A panel sometimes does a different thing depending on what was
+filled in, and not every branch is one a rule can describe. Horizon's **Add
+Interface** form attaches a subnet, unless an address is typed too, in which
+case it makes a port and attaches that — and neither the port's network nor
+its name is submitted, so no command can be written for it. Saying nothing is
+right there; rendering the subnet command anyway would describe an action
+that did not happen. The gated field shows up in ``uncovered()``, which is
+accurate: it is read, and never rendered.
+
+A rule's ``envelope`` names the key its REST body is wrapped in, which is
+nearly always the resource. Two other values: ``rules.FLAT`` sends the body
+bare, which is what Neutron's ``add_router_interface`` takes, and ``None``
+sends no body at all, which is how Keystone grants a role.
+
 A follow-up call needs the id of the thing the first call created, and
 Astrolabe never sees a response, so it cannot know it. The rule declares
 ``creates``, a placeholder that ``{new}`` in a step's endpoint resolves to, and
@@ -799,6 +816,24 @@ Known limits
   shell is scoped to at the time. Every other recorded command names what it
   acts on; these do not. Add ``--project`` yourself if you will run them
   elsewhere.
+* **Adding a router interface with a fixed address is not recorded.**
+  Leave the optional **IP Address** box empty and the action comes out as
+  ``openstack router add subnet``. Fill it in and Horizon does something
+  else entirely: it creates a port carrying that address and attaches the
+  port. Neither the port's network nor its name is submitted, so the
+  commands for it cannot be written, and the rule stands aside rather than
+  render the subnet form of it. You get nothing for that submission, which
+  is the honest answer.
+* **Security group rules are not recorded at all**, though the groups
+  themselves are. Every other panel Astrolabe reads *maps* a submission to
+  a request; this one has Horizon **compute** the request from it. The port
+  field becomes both ends of a range, or the two range fields are used, or
+  all of them are cleared, depending on a fourth field. For ICMP the type
+  and code become the port range. And the preset entries — "All TCP",
+  "SSH" — carry no protocol or ports in the submission at all: those come
+  out of ``SECURITY_GROUP_RULES``, a setting each deployment can change.
+  Covering only the custom entries would leave an operator unable to tell
+  which of their rules got recorded, so the panel is left out whole.
 * **Create router does not record Enable SNAT.** Not for want of a way to
   say "only when a gateway network was chosen too" — ``only()`` does that.
   The blocker is that Horizon *deletes* the checkbox where Neutron has no

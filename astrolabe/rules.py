@@ -39,6 +39,12 @@ VOLUME = "$OS_VOLUME_API"
 NETWORK = "$OS_NETWORK_API"
 IDENTITY = "$OS_IDENTITY_API"
 
+#: An ``envelope`` of FLAT sends the REST body with no wrapper around it.
+#: Neutron's add_router_interface takes ``{"subnet_id": ...}`` bare, where
+#: nearly every other call wraps its body in the name of the resource. An
+#: envelope of None is different again, and sends no body at all.
+FLAT = ""
+
 # Import prefixes, only to keep the table list below readable.
 ADMIN = "openstack_dashboard.dashboards.admin."
 IDENT = "openstack_dashboard.dashboards.identity."
@@ -886,6 +892,57 @@ FORMS = [
                 "distributed": ("--distributed", True),
             }),
             target(),
+        ],
+    },
+    {
+        "id": "router-set-gateway",
+        "title": "Set router gateway",
+        # Project dashboard only, and not for the usual reason: the admin
+        # router panel has no such page at all. Its urls.py stops at
+        # update.
+        "url": r"/project/routers/(?P<id>[^/]+)/setgateway/?$",
+        "form": PROJ + "routers.ports.forms:SetGatewayForm",
+        "routes": ["horizon:project:routers:setgateway"],
+        "method": "PUT",
+        "endpoint": NETWORK + "/routers/{id}",
+        "envelope": "router",
+        "command": ["openstack", "router", "set"],
+        # enable_snat is unmapped here for the reason router-create gives,
+        # and this form is where that reason is plainest: it deletes the
+        # field whenever ext-gw-mode is missing or the policy refuses, so
+        # an absent box means either "unticked" or "never offered".
+        "fields": [
+            opt("network_id", "--external-gateway",
+                api="external_gateway_info.network_id"),
+            target(),
+        ],
+    },
+    {
+        "id": "router-add-interface",
+        "title": "Add interface to router",
+        "url": r"/project/routers/(?P<id>[^/]+)/addinterface/?$",
+        "form": PROJ + "routers.ports.forms:AddInterface",
+        "routes": ["horizon:project:routers:addinterface"],
+        # Stands aside when an address was typed, and uncovered() lists
+        # ip_address for that reason: it is read, and never rendered. The
+        # form calls one API with just a subnet, and a different one when
+        # an address comes too,
+        # creating a port first and attaching that -- and neither the
+        # port's network nor its name is submitted, so the command for it
+        # cannot be written. Rendering the subnet command anyway would
+        # describe an action that did not happen. See Known limits.
+        "unless": ["ip_address"],
+        "method": "PUT",
+        "endpoint": NETWORK + "/routers/{id}/add_router_interface",
+        # Neutron takes this one bare, with no "router" around it.
+        "envelope": FLAT,
+        "command": ["openstack", "router", "add", "subnet"],
+        # Two trailing arguments, in the order the CLI wants them: the
+        # router it is being added to, then the subnet being added. The
+        # router is also what the entry is about, which is why it is first.
+        "fields": [
+            target(),
+            arg("subnet_id", api="subnet_id"),
         ],
     },
     {
