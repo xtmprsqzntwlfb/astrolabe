@@ -732,9 +732,11 @@ Horizon talks Keystone v3 and Cinder v3 and the v2 parsers are missing flags
 the rules legitimately use.
 
 CI (``.github/workflows/ci.yml``) runs flake8, then the suite twice on each of
-Python 3.9 through 3.13 — once on a bare interpreter, which is what keeps the
+Python 3.11 through 3.14 — once on a bare interpreter, which is what keeps the
 "needs nothing" claim above honest, and again with Django installed to pick up
-layer 3. A separate job installs ``python-openstackclient`` for layer 5. It
+layer 3. Those are the interpreters Horizon supports, and each is paired with
+a Django version Horizon tests and that interpreter can actually run: 3.11
+with 4.2, 3.12 and 3.13 with 5.2, 3.14 with 6.0. A separate job installs ``python-openstackclient`` for layer 5. It
 also builds a wheel and checks the template and the enabled file are inside
 it. **Layer 4 is not part of that run**: it needs a Horizon checkout, and
 pinning one Horizon version to every pull request would say nothing useful

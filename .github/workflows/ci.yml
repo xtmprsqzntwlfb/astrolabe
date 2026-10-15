@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       # hacking supplies the H-codes that setup.cfg names in
       # enable-extensions, and brings its own compatible flake8. Without it
       # flake8 accepts the config and quietly checks nothing for those codes.
@@ -35,8 +35,20 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Horizon supports Python 3.11 to 3.14 and tests Django 4.2, 5.2 and
+      # 6.0. Which of those Django versions an interpreter can run differs,
+      # so the pairs are spelled out rather than crossed: 3.11 with the
+      # oldest Django Horizon still supports, 3.14 with the newest.
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+        include:
+          - python-version: '3.11'
+            django: '~=4.2.0'
+          - python-version: '3.12'
+            django: '~=5.2.0'
+          - python-version: '3.13'
+            django: '~=5.2.0'
+          - python-version: '3.14'
+            django: '~=6.0.0'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,9 +62,8 @@ jobs:
       - name: Tests with nothing installed
         run: python tests/test_rules.py
 
-      # 4.2 is Horizon's era, and Django 5 has dropped Python 3.9.
       - name: Install Django
-        run: pip install 'Django~=4.2'
+        run: pip install 'Django${{ matrix.django }}'
 
       # The middleware layer skips itself when Django is absent, so a failed
       # install above would leave this job green while testing less than it
@@ -75,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - run: pip install python-openstackclient
 
       # The layer skips itself when the CLI is absent, so a failed install
@@ -99,7 +110,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - run: pip wheel --no-deps -w dist .
 
       # package_data and MANIFEST.in have drifted before. A plugin whose

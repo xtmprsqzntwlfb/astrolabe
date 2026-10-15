@@ -1597,33 +1597,18 @@ def takes_positional(spec):
                for field in spec["fields"])
 
 
-def _entry_point_groups():
-    """Entry points keyed by group, across the versions of the API.
-
-    ``entry_points()`` returned a plain mapping until 3.10 and an object with
-    ``select`` from then on. This package supports 3.9, so both are handled:
-    on the old one the crash would be an AttributeError escaping verify_cli()
-    rather than a problem it reports, which is the one outcome a checking
-    function must not have.
-    """
+def _cli_commands():
+    """Every openstack command name, mapped to its newest implementation."""
     from importlib.metadata import entry_points
 
     available = entry_points()
-    if hasattr(available, "select"):
-        return {group: available.select(group=group)
-                for group in available.groups}
-    return dict(available)
-
-
-def _cli_commands():
-    """Every openstack command name, mapped to its newest implementation."""
     found = {}
-    for group, entries in _entry_point_groups().items():
+    for group in available.groups:
         match = _CLI_GROUP.match(group)
         if not match:
             continue
         version = int(match.group(1))
-        for entry in entries:
+        for entry in available.select(group=group):
             seen = found.get(entry.name)
             if seen is None or version > seen[0]:
                 found[entry.name] = (version, entry)
