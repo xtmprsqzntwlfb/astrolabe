@@ -18,4 +18,4 @@
 #: Not derived from git tags: pbr would do that, but it is the one OpenStack
 #: convention this repository does without, and a version that only exists in
 #: a tag is a version an operator cannot read off a checkout.
-__version__ = "0.1.0"
+__version__ = "1.0.0"

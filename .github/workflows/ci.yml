@@ -117,11 +117,14 @@ jobs:
       # template or enabled file is missing from the wheel installs cleanly
       # and then fails in the dashboard, which is the worst place to find out.
       #
-      # The version is checked here too. setup.cfg reads it from
-      # astrolabe.__version__ with attr:, and the failure mode is quiet:
-      # setuptools falls back to 0.0.0 rather than complaining, leaving every
-      # install indistinguishable from every other one.
-      - name: Check the wheel carries the template, the enabled file and a version
+      # The version and the long description are checked here too, because
+      # both fail quietly. setup.cfg reads the version from
+      # astrolabe.__version__ with attr:, and setuptools falls back to 0.0.0
+      # rather than complaining, leaving every install indistinguishable from
+      # every other one. The long description is worse: spell the key the way
+      # pbr does and setuptools ignores it without a word, publishing a
+      # package whose page is blank below the summary.
+      - name: Check the wheel carries the template, the enabled file, a version and the README
         run: |
           python - <<'PY'
           import glob
@@ -141,6 +144,20 @@ jobs:
               sys.exit('%s is version %r; setup.cfg has lost its version key '
                        'or attr: no longer resolves' % (wheel, version))
           print('%s is version %s' % (wheel, version))
+
+          # METADATA puts the long description in the body, after the blank
+          # line that ends the headers.
+          headers, _, described = archive.read(metadata).decode().partition(
+              '\n\n')
+          if 'Description-Content-Type:' not in headers:
+              sys.exit('%s declares no description content type; setup.cfg '
+                       'has lost long_description_content_type' % wheel)
+          if len(described.strip()) < 500:
+              sys.exit('%s carries %d characters of description; setup.cfg '
+                       'has lost long_description, so the README is not in '
+                       'the package' % (wheel, len(described.strip())))
+          print('%s carries %d characters of README'
+                % (wheel, len(described.strip())))
 
           required = {
               'astrolabe/templates/astrolabe/index.html',
