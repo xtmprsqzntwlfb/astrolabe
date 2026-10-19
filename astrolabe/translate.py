@@ -291,17 +291,34 @@ def _apply_parent(field, raw, parts, body, creates):
         _put(body, field["api"], creates)
 
 
-def _apply_captured(field, captured, parts, body):
+def _names_subject(field, placed):
+    """What a captured value contributes to the entry's title.
+
+    Only when it is the command's trailing argument. Behind a flag it
+    qualifies the action rather than naming its subject: a snapshot entry
+    is about the snapshot, not the volume --volume points at.
+    """
+    return "" if field["flag"] else (placed or "")
+
+
+def _apply_captured(field, captured, parts, trailing, body):
     """A resource named by the path rather than the form.
 
-    An attribute of the thing being made rather than its identity, so it
-    takes a flag and goes in the body. See rules.captured().
+    An attribute of the thing being acted on rather than its identity, so
+    it goes in the body. Behind a flag, or as a trailing argument where the
+    CLI wants one. Returns what it placed, for the entry's title.
+    See rules.captured().
     """
     found = captured.get(field["field"])
     if _blank(found):
-        return
-    parts += [field["flag"], shq(found)]
-    _put(body, field["api"], str(found))
+        return None
+    if field["flag"]:
+        parts += [field["flag"], shq(found)]
+    else:
+        trailing.append(shq(found))
+    if field["api"]:
+        _put(body, field["api"], str(found))
+    return str(found)
 
 
 def _apply_boolean(field, raw, parts, body):
@@ -354,7 +371,8 @@ def _render(spec, fields, captured, item=None, creates=None):
             _apply_parent(field, raw, parts, body, creates)
 
         elif kind == "captured":
-            _apply_captured(field, captured, parts, body)
+            placed = _apply_captured(field, captured, parts, trailing, body)
+            subject = subject or _names_subject(field, placed)
 
         elif kind == "choice":
             _apply_choice(field, raw, parts, body)

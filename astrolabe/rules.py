@@ -147,7 +147,7 @@ def pairs(field, flag, api, keys, api_keys=None, clear=None):
 
 
 def captured(group, flag, api):
-    """A value out of the URL, handed to the command as a flag.
+    """A value out of the URL that describes the thing being acted on.
 
     Not every id in a path is the thing being changed. A subnet is created
     inside a network, and the network is named by the path rather than by
@@ -155,6 +155,12 @@ def captured(group, flag, api):
     would make it the command's trailing argument, which is the subnet's
     place; this passes it as a flag and writes it to the body, where it is
     an attribute of the new subnet rather than its identity.
+
+    Pass ``flag=None`` where the CLI wants it as a trailing argument rather
+    than behind a flag. ``server add volume`` takes the server and then the
+    volume, and the volume comes from the path. That is still not a
+    :func:`target`: a target is the resource the REST call is addressed to,
+    and this one travels in the body while the path names the server.
     """
     return {"kind": "captured", "field": group, "flag": flag, "api": api}
 
@@ -359,6 +365,95 @@ FORMS = [
             boolean("is_public", "os-volume-type-access:is_public",
                     off="--private"),
             arg("name"),
+        ],
+    },
+    {
+        "id": "volume-update",
+        "title": "Update volume",
+        "url": r"/project/volumes/(?P<id>[^/]+)/update/?$",
+        "form": PROJ + "volumes.forms:UpdateForm",
+        "routes": ["horizon:project:volumes:update"],
+        "method": "PUT",
+        "endpoint": VOLUME + "/volumes/{id}",
+        "envelope": "volume",
+        "command": ["openstack", "volume", "set"],
+        # bootable is unmapped, and uncovered() lists it. It is not part of
+        # the update request at all: Horizon sends a second call to
+        # os-set_bootable, and only when the box differs from what the
+        # volume already had. Astrolabe never sees the old value, so it
+        # cannot tell a change from a box left alone, and recording the
+        # call every time would claim one Horizon usually did not make.
+        # See Known limits.
+        "fields": [
+            opt("name", "--name"),
+            opt("description", "--description", clearable=True),
+            target(),
+        ],
+    },
+    {
+        "id": "volume-extend",
+        "title": "Extend volume",
+        "url": r"/project/volumes/(?P<id>[^/]+)/extend/?$",
+        "form": PROJ + "volumes.forms:ExtendForm",
+        "routes": ["horizon:project:volumes:extend"],
+        "method": "POST",
+        # Cinder resizes through an action rather than a field on the
+        # volume, so the envelope is the action and not the resource.
+        "endpoint": VOLUME + "/volumes/{id}/action",
+        "envelope": "os-extend",
+        "command": ["openstack", "volume", "set"],
+        # name and orig_size are on the form to show the operator what they
+        # are changing, both rendered readonly, and neither is sent.
+        # uncovered() lists them.
+        "fields": [
+            opt("new_size", "--size", api="new_size", cast="int"),
+            target(),
+        ],
+    },
+    {
+        "id": "volume-snapshot-create",
+        "title": "Create volume snapshot",
+        "url": r"/project/volumes/(?P<volume>[^/]+)/create_snapshot/?$",
+        "form": PROJ + "volumes.forms:CreateSnapshotForm",
+        "routes": ["horizon:project:volumes:create_snapshot"],
+        "method": "POST",
+        "endpoint": VOLUME + "/snapshots",
+        "envelope": "snapshot",
+        "command": ["openstack", "volume", "snapshot", "create"],
+        # The form carries a hidden volume_id too, built in __init__ so
+        # base_fields never sees it. The path carries the same value and is
+        # where this reads it, as every other rule does.
+        #
+        # force is unmapped: Horizon sets it from the volume's current
+        # status, which is not in the submission. A snapshot of an attached
+        # volume therefore records a command that Cinder will refuse
+        # without --force. See Known limits.
+        "fields": [
+            captured("volume", "--volume", api="volume_id"),
+            opt("description", "--description"),
+            arg("name"),
+        ],
+    },
+    {
+        "id": "volume-attach",
+        "title": "Attach volume to instance",
+        "url": r"/project/volumes/(?P<volume>[^/]+)/attach/?$",
+        "form": PROJ + "volumes.forms:AttachForm",
+        "routes": ["horizon:project:volumes:attach"],
+        "method": "POST",
+        # The only Cinder panel whose call goes to Nova: an attachment
+        # hangs off the server, not off the volume.
+        "endpoint": COMPUTE + "/servers/{instance}/os-volume_attachments",
+        "envelope": "volumeAttachment",
+        "command": ["openstack", "server", "add", "volume"],
+        # Two trailing arguments, server then volume, which is the order
+        # the CLI reads them. The volume comes from the path and is not a
+        # target: the request is addressed to the server, and the volume
+        # travels in the body.
+        "fields": [
+            opt("device", "--device"),
+            arg("instance", api=None),
+            captured("volume", None, api="volumeId"),
         ],
     },
     {
@@ -1591,10 +1686,21 @@ def form_targets(spec):
     return [target] if isinstance(target, str) else list(target)
 
 
+#: Kinds that put a trailing argument on the command line. A ``captured``
+#: does so only when the rule gave it no flag.
+TRAILING = frozenset(["positional", "target", "item"])
+
+
+def trailing_fields(spec):
+    """The fields that become trailing arguments, in the order written."""
+    return [field for field in spec["fields"]
+            if field["kind"] in TRAILING or
+            (field["kind"] == "captured" and not field["flag"])]
+
+
 def takes_positional(spec):
     """Whether a spec ends its command with something, as all of them do."""
-    return any(field["kind"] in ("positional", "target", "item")
-               for field in spec["fields"])
+    return bool(trailing_fields(spec))
 
 
 def _cli_commands():

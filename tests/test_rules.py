@@ -172,7 +172,7 @@ class TestRuleSet(unittest.TestCase):
     #: order they are written in is the order the CLI reads them. Listed so
     #: that a second one appearing on some other rule is a deliberate act
     #: rather than something that slipped in.
-    ORDERED_ARGUMENTS = {"router-add-interface"}
+    ORDERED_ARGUMENTS = {"router-add-interface", "volume-attach"}
 
     def test_a_rule_names_what_it_acts_on(self):
         # The interpreter appends these last. One is the usual shape: a
@@ -181,8 +181,10 @@ class TestRuleSet(unittest.TestCase):
         # being incidental and starts being load-bearing, so those rules are
         # named above rather than discovered.
         for form in rules.FORMS:
-            trailing = [f for f in form["fields"]
-                        if f["kind"] in ("positional", "target")]
+            # Asked of the interpreter's own helper rather than restated
+            # here, so a kind that starts producing trailing arguments
+            # cannot slip past this test while the renderer honours it.
+            trailing = rules.trailing_fields(form)
             with self.subTest(form["id"]):
                 self.assertTrue(trailing, "the command names no resource")
                 if len(trailing) > 1:
@@ -740,6 +742,84 @@ class TestTranslate(unittest.TestCase):
                                       {"net_name": "p", "admin_state": "on"})
         self.assertEqual(cli(admin), "openstack network create a")
         self.assertEqual(cli(project), "openstack network create p")
+
+    def test_editing_and_extending_a_volume_are_different_calls(self):
+        # Both render "volume set", which is the CLI folding two Cinder
+        # operations into one command. The REST halves are not alike: an
+        # edit is a PUT on the volume, a resize is an action posted to it.
+        edited = translate.translate("/project/volumes/v-1/update",
+                                     {"name": "data",
+                                      "description": "db data"})
+        self.assertEqual(
+            cli(edited),
+            "openstack volume set --name data --description 'db data' v-1")
+        self.assertEqual(edited["calls"][0]["method"], "PUT")
+        self.assertEqual(edited["calls"][0]["url"],
+                         "$OS_VOLUME_API/volumes/v-1")
+
+        extended = translate.translate("/project/volumes/v-1/extend",
+                                       {"name": "data", "orig_size": "10",
+                                        "new_size": "50"})
+        self.assertEqual(cli(extended), "openstack volume set --size 50 v-1")
+        self.assertEqual(extended["calls"][0]["method"], "POST")
+        self.assertEqual(extended["calls"][0]["url"],
+                         "$OS_VOLUME_API/volumes/v-1/action")
+        self.assertEqual(extended["calls"][0]["body"],
+                         {"os-extend": {"new_size": 50}})
+        # The two readonly fields the form shows for context are not sent.
+        self.assertNotIn("--name", cli(extended))
+
+    def test_a_snapshot_is_named_after_itself_not_its_volume(self):
+        # The volume reaches the command behind --volume, which qualifies
+        # the action rather than naming it. The entry is about the snapshot.
+        out = translate.translate("/project/volumes/v-1/create_snapshot",
+                                  {"name": "nightly",
+                                   "description": "before upgrade"})
+        self.assertEqual(
+            cli(out),
+            "openstack volume snapshot create --volume v-1 "
+            "--description 'before upgrade' nightly")
+        self.assertEqual(out["title"], "Create volume snapshot nightly")
+        self.assertEqual(out["calls"][0]["body"]["snapshot"]["volume_id"],
+                         "v-1")
+
+    def test_attaching_a_volume_posts_to_the_server_not_the_volume(self):
+        # The only Cinder panel whose call goes to Nova. The server is in
+        # the path, the volume travels in the body, and the command names
+        # both in the order the CLI reads them.
+        out = translate.translate("/project/volumes/v-1/attach",
+                                  {"instance": "i-9", "device": "/dev/vdc"})
+        self.assertEqual(
+            cli(out),
+            "openstack server add volume --device /dev/vdc i-9 v-1")
+        call = out["calls"][0]
+        self.assertEqual(
+            call["url"],
+            "$OS_COMPUTE_API/servers/i-9/os-volume_attachments")
+        self.assertEqual(call["body"]["volumeAttachment"],
+                         {"device": "/dev/vdc", "volumeId": "v-1"})
+        self.assertEqual(out["title"], "Attach volume to instance i-9")
+
+    def test_an_attach_without_a_device_leaves_it_to_the_hypervisor(self):
+        out = translate.translate("/project/volumes/v-1/attach",
+                                  {"instance": "i-9"})
+        self.assertEqual(cli(out), "openstack server add volume i-9 v-1")
+        self.assertNotIn("device", out["calls"][0]["body"]["volumeAttachment"])
+
+    def test_a_flagged_capture_does_not_claim_the_entry_title(self):
+        # Two rules read a resource out of the path, and only one of them
+        # is the thing the entry is about. Behind a flag it qualifies the
+        # action; as a trailing argument it can name it.
+        titles = {
+            "/admin/networks/net-1/subnets/create": "Create subnet v4",
+            "/project/volumes/v-1/create_snapshot":
+                "Create volume snapshot v4",
+        }
+        for url, expected in titles.items():
+            with self.subTest(url):
+                out = translate.translate(url, {"subnet_name": "v4",
+                                                "name": "v4"})
+                self.assertEqual(out["title"], expected)
 
     def test_setting_a_router_gateway_nests_the_network(self):
         out = translate.translate("/project/routers/r-1/setgateway",

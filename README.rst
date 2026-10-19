@@ -141,7 +141,11 @@ Create subnet                  ``openstack subnet create``
 Create security group          ``openstack security group create``
 Add interface to router        ``openstack router add subnet``
 Allocate floating IP           ``openstack floating ip create``
+Create volume snapshot         ``openstack volume snapshot create``
+Attach volume to instance      ``openstack server add volume``
 Associate floating IP          ``openstack floating ip set --port``
+Edit volume                    ``openstack volume set``
+Extend volume                  ``openstack volume set --size``
 Edit volume type               ``openstack volume type set``
 Edit network                   ``openstack network set``
 Edit subnet                    ``openstack subnet set``
@@ -535,12 +539,17 @@ everything so far:
     value is the ``gateway`` to the CLI and the ``nexthop`` to Neutron.
 
 ``captured(group, flag, api)``
-    A value out of the URL, handed to the command as a flag. Not every id in
-    a path is the thing being changed: a subnet is created *inside* a network,
-    and the network is named by the path rather than by the form. ``target``
-    would make it the command's trailing argument, which is the subnet's
-    place; this passes it as a flag and writes it to the body, where it is an
-    attribute of the new subnet rather than its identity.
+    A value out of the URL that describes the thing being acted on. Not every
+    id in a path is the thing being changed: a subnet is created *inside* a
+    network, and the network is named by the path rather than by the form.
+    ``target`` would make it the command's trailing argument, which is the
+    subnet's place; this passes it as a flag and writes it to the body, where
+    it is an attribute of the new subnet rather than its identity. Pass
+    ``flag=None`` where the CLI wants a trailing argument instead —
+    ``server add volume`` takes the server and then the volume, and the
+    volume comes from the path. That is still not a ``target``: a target is
+    the resource the REST call is addressed to, and this one travels in the
+    body while the path names the server.
 
 ``parent(field, flag, api)``
     The resource the rule's first call created, as a follow-up step sees it —
@@ -836,6 +845,16 @@ Known limits
   out of ``SECURITY_GROUP_RULES``, a setting each deployment can change.
   Covering only the custom entries would leave an operator unable to tell
   which of their rules got recorded, so the panel is left out whole.
+* **Marking a volume bootable is not recorded.** It is not part of the
+  edit request: Horizon sends a second call to ``os-set_bootable``, and only
+  when the box differs from what the volume already had. Astrolabe never
+  sees the old value, so it cannot tell a change from a box left alone, and
+  recording the call every time would claim one that usually was not made.
+  Add ``--bootable`` or ``--non-bootable`` yourself if you changed it.
+* **A snapshot of an attached volume records a command Cinder will
+  refuse.** Horizon passes ``force`` when the volume is in use, which it
+  learns by fetching the volume; the submission says nothing about it. Add
+  ``--force`` yourself when snapshotting a volume that is attached.
 * **Create router does not record Enable SNAT.** Not for want of a way to
   say "only when a gateway network was chosen too" — ``only()`` does that.
   The blocker is that Horizon *deletes* the checkbox where Neutron has no
