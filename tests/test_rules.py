@@ -743,6 +743,98 @@ class TestTranslate(unittest.TestCase):
         self.assertEqual(cli(admin), "openstack network create a")
         self.assertEqual(cli(project), "openstack network create p")
 
+    #: Everything the volume create panel posts when all four sources are
+    #: available, which is what it does: the three selects are hidden by
+    #: the page, not removed, so each still posts whatever it is showing.
+    EVERY_SOURCE = {
+        "name": "data", "description": "db", "size": "50", "type": "ssd",
+        "availability_zone": "nova", "snapshot_source": "snap-1",
+        "image_source": "img-1", "volume_source": "vol-9",
+    }
+
+    def test_one_source_flag_however_many_selects_were_posted(self):
+        # The reason this rule keys off volume_source_type rather than off
+        # which field is filled in. Three source flags on one command is
+        # not a worse command, it is one the CLI refuses outright.
+        for chosen in ("no_source_type", "snapshot_source", "image_source",
+                       "volume_source"):
+            out = translate.translate(
+                "/project/volumes/create",
+                dict(self.EVERY_SOURCE, volume_source_type=chosen))
+            with self.subTest(chosen):
+                flags = [f for f in ("--snapshot", "--image", "--source")
+                         if f in cli(out)]
+                self.assertEqual(len(flags), 0 if chosen == "no_source_type"
+                                 else 1, cli(out))
+
+    def test_a_volume_from_a_snapshot_forgets_the_type_and_zone(self):
+        # Horizon discards both before calling Cinder, so a command that
+        # passed them would not be the request the dashboard made.
+        out = translate.translate(
+            "/project/volumes/create",
+            dict(self.EVERY_SOURCE, volume_source_type="snapshot_source"))
+        self.assertEqual(
+            cli(out),
+            "openstack volume create --description db --size 50 "
+            "--snapshot snap-1 data")
+        body = out["calls"][0]["body"]["volume"]
+        self.assertNotIn("volume_type", body)
+        self.assertNotIn("availability_zone", body)
+
+    def test_a_cloned_volume_keeps_its_zone_but_not_its_type(self):
+        # The two suppressions are not the same set, which is the whole
+        # reason they are two gates rather than one.
+        out = translate.translate(
+            "/project/volumes/create",
+            dict(self.EVERY_SOURCE, volume_source_type="volume_source"))
+        self.assertIn("--availability-zone nova", cli(out))
+        self.assertNotIn("--type", cli(out))
+        self.assertEqual(out["calls"][0]["body"]["volume"]["source_volid"],
+                         "vol-9")
+
+    def test_a_volume_from_an_image_keeps_everything(self):
+        out = translate.translate(
+            "/project/volumes/create",
+            dict(self.EVERY_SOURCE, volume_source_type="image_source"))
+        self.assertEqual(
+            cli(out),
+            "openstack volume create --description db --size 50 --type ssd "
+            "--availability-zone nova --image img-1 data")
+        # Cinder spells this one in camel case, alone among the sources.
+        self.assertEqual(out["calls"][0]["body"]["volume"]["imageRef"],
+                         "img-1")
+
+    def test_an_empty_volume_names_no_source_at_all(self):
+        out = translate.translate(
+            "/project/volumes/create",
+            dict(self.EVERY_SOURCE, volume_source_type="no_source_type"))
+        self.assertEqual(
+            cli(out),
+            "openstack volume create --description db --size 50 --type ssd "
+            "--availability-zone nova data")
+
+    def test_a_source_type_nobody_has_heard_of_keeps_the_type_and_zone(self):
+        # The suppressions are spelled "not a snapshot" rather than "one of
+        # these", so a source type added upstream behaves like Horizon's own
+        # else branch and keeps them, instead of silently dropping them.
+        out = translate.translate(
+            "/project/volumes/create",
+            dict(self.EVERY_SOURCE, volume_source_type="backup_source"))
+        self.assertIn("--type ssd", cli(out))
+        self.assertIn("--availability-zone nova", cli(out))
+
+    def test_a_form_that_offered_no_source_at_all_still_works(self):
+        # Horizon deletes volume_source_type outright when the cloud has no
+        # snapshots, images or volumes to offer. Nothing is submitted, and
+        # the gates have to read that as "no source" rather than crash or
+        # suppress.
+        out = translate.translate("/project/volumes/create",
+                                  {"name": "first", "size": "1",
+                                   "type": "ssd"})
+        self.assertEqual(
+            cli(out),
+            "openstack volume create --size 1 --type ssd first")
+
     def test_editing_and_extending_a_volume_are_different_calls(self):
         # Both render "volume set", which is the CLI folding two Cinder
         # operations into one command. The REST halves are not alike: an

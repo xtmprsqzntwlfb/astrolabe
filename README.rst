@@ -141,6 +141,7 @@ Create subnet                  ``openstack subnet create``
 Create security group          ``openstack security group create``
 Add interface to router        ``openstack router add subnet``
 Allocate floating IP           ``openstack floating ip create``
+Create volume                  ``openstack volume create``
 Create volume snapshot         ``openstack volume snapshot create``
 Attach volume to instance      ``openstack server add volume``
 Associate floating IP          ``openstack floating ip set --port``
@@ -557,14 +558,24 @@ everything so far:
     operator typed a name and the CLI resolves one; the body gets the rule's
     ``creates`` placeholder, because it wants an id that does not exist yet.
 
-Any of these can be wrapped in ``only(field, when, unless)``, which gates it
-on the state of other fields. Horizon's forms are full of fields that mean
-something only in company: a subnet's prefix length is sent only alongside an
-address pool, and its gateway only when **Disable Gateway** is clear. The
-second is not hypothetical tidiness — that checkbox *hides* the gateway input
-rather than removing it, so a value typed before it was ticked is still
-posted, and an ungated rule would render two contradictory ``--gateway``
-flags.
+Any of these can be wrapped in ``only(field, when, unless, equals, differs)``,
+which gates it on the state of other fields. Horizon's forms are full of
+fields that mean something only in company: a subnet's prefix length is sent
+only alongside an address pool, and its gateway only when **Disable Gateway**
+is clear. The second is not hypothetical tidiness — that checkbox *hides* the
+gateway input rather than removing it, so a value typed before it was ticked
+is still posted, and an ungated rule would render two contradictory
+``--gateway`` flags.
+
+``when`` and ``unless`` gate on presence. ``equals`` and ``differs`` gate on
+value, because presence is not always enough. A switched form such as volume
+create posts *every* one of its source selects on every save and lets a
+separate field say which one counted; keying off "is it filled in" would
+render three mutually exclusive source flags at once. Prefer ``differs`` when
+suppressing a field: Horizon drops the availability zone for a snapshot
+source and keeps it otherwise, and spelling that as "not a snapshot" keeps
+the zone for a source type added later, which is what the form's own else
+branch does.
 
 ``target(group)``
     The resource an edit form is editing, read out of the URL rather than
@@ -845,6 +856,10 @@ Known limits
   out of ``SECURITY_GROUP_RULES``, a setting each deployment can change.
   Covering only the custom entries would leave an operator unable to tell
   which of their rules got recorded, so the panel is left out whole.
+* **A volume's group is not recorded.** The create form offers a generic
+  volume group, and ``openstack volume create`` has no flag for one — only
+  ``--consistency-group``, which is the older and different concept. The
+  recorded command makes the volume outside any group.
 * **Marking a volume bootable is not recorded.** It is not part of the
   edit request: Horizon sends a second call to ``os-set_bootable``, and only
   when the box differs from what the volume already had. Astrolabe never

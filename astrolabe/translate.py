@@ -117,6 +117,16 @@ def _split_lines(value):
     return [line.strip() for line in str(text).splitlines() if line.strip()]
 
 
+def _held(fields, name):
+    """What a field holds, for comparing against a rule's value gate.
+
+    A field the form never submitted compares as "", so a rule can say so
+    explicitly rather than leaving absence to mean whatever it happens to.
+    """
+    found = _scalar(fields.get(name))
+    return "" if _blank(found) else str(found)
+
+
 def _gated(field, fields):
     """Whether a field's ``when`` and ``unless`` conditions are met.
 
@@ -128,6 +138,12 @@ def _gated(field, fields):
             return False
     for name in field.get("unless") or []:
         if not _blank(_scalar(fields.get(name))):
+            return False
+    for name, values in (field.get("equals") or {}).items():
+        if _held(fields, name) not in values:
+            return False
+    for name, values in (field.get("differs") or {}).items():
+        if _held(fields, name) in values:
             return False
     return True
 

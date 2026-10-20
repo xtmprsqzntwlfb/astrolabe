@@ -177,7 +177,7 @@ def parent(field, flag, api):
     return {"kind": "parent", "field": field, "flag": flag, "api": api}
 
 
-def only(field, when=None, unless=None):
+def only(field, when=None, unless=None, equals=None, differs=None):
     """Gate a field on the state of others. Wraps any of the kinds above.
 
     Horizon's forms are full of fields that mean something only in company:
@@ -186,11 +186,30 @@ def only(field, when=None, unless=None):
     regardless would render two ``--gateway`` flags, or a prefix length for
     a subnet that has no pool to take it from.
 
-    ``when`` names fields that must all carry a value, ``unless`` fields
-    that must all be empty. Absent counts as empty, and an unticked checkbox
-    is absent.
+    Two gates on presence. ``when`` names fields that must all carry a
+    value, ``unless`` fields that must all be empty. Absent counts as empty,
+    and an unticked checkbox is absent.
+
+    Two on value, each a mapping of field name to the values it may or may
+    not hold. ``equals`` requires one of them, ``differs`` forbids all of
+    them, and a field that was not submitted compares as "". Presence is not
+    enough on a switched form: the volume create panel posts its snapshot,
+    image and volume selects on every save and lets a fourth field say which
+    one counted, so a rule keying off "is it filled in" would render three
+    mutually exclusive source flags at once.
+
+    Prefer ``differs`` for suppressing a field, because it fails in the
+    safer direction. Horizon drops the availability zone when the source is
+    a snapshot and keeps it otherwise; spelling that as "not a snapshot"
+    keeps the zone for a source type added later, which is what the form's
+    own else branch would do. Listing the permitted values instead would
+    silently start dropping it.
     """
-    return dict(field, when=list(when or []), unless=list(unless or []))
+    return dict(field, when=list(when or []), unless=list(unless or []),
+                equals={name: tuple(values)
+                        for name, values in (equals or {}).items()},
+                differs={name: tuple(values)
+                         for name, values in (differs or {}).items()})
 
 
 def arg(field, api="name"):
@@ -364,6 +383,51 @@ FORMS = [
             # The form ships this ticked; only the private case needs a flag.
             boolean("is_public", "os-volume-type-access:is_public",
                     off="--private"),
+            arg("name"),
+        ],
+    },
+    {
+        "id": "volume-create",
+        "title": "Create volume",
+        "url": r"/project/volumes/create/?$",
+        "form": PROJ + "volumes.forms:CreateForm",
+        "routes": ["horizon:project:volumes:create"],
+        "method": "POST",
+        "endpoint": VOLUME + "/volumes",
+        "envelope": "volume",
+        "command": ["openstack", "volume", "create"],
+        # A switched form, and the switch is the only thing that says which
+        # source counted. All three source selects post on every save --
+        # they are ordinary selects that the page merely hides -- so a rule
+        # reading "is it filled in" would render --snapshot, --image and
+        # --source together, which the CLI refuses as mutually exclusive.
+        # volume_source_type is what Horizon reads, and so is this.
+        #
+        # Two unmapped, and uncovered() lists both. volume_source_type is
+        # read by every gate below and rendered by none, as with_subnet is
+        # on the network wizard. group is a generic volume group, and the
+        # CLI offers only --consistency-group, which is the older and
+        # different thing. See Known limits.
+        "fields": [
+            opt("description", "--description"),
+            opt("size", "--size", cast="int"),
+            # Horizon throws the operator's type away when the source is a
+            # snapshot or another volume, and the zone away for a snapshot.
+            # Spelled as "not those" rather than "one of these", so a source
+            # type added upstream keeps them, which is what the form's own
+            # else branch does.
+            only(opt("type", "--type", api="volume_type"),
+                 differs={"volume_source_type": ("snapshot_source",
+                                                 "volume_source")}),
+            only(opt("availability_zone", "--availability-zone"),
+                 differs={"volume_source_type": ("snapshot_source",)}),
+            only(opt("snapshot_source", "--snapshot", api="snapshot_id"),
+                 equals={"volume_source_type": ("snapshot_source",)}),
+            # Cinder spells the image key in camel case, alone among these.
+            only(opt("image_source", "--image", api="imageRef"),
+                 equals={"volume_source_type": ("image_source",)}),
+            only(opt("volume_source", "--source", api="source_volid"),
+                 equals={"volume_source_type": ("volume_source",)}),
             arg("name"),
         ],
     },
