@@ -102,5 +102,11 @@ plain GET returning a shell script.
     does not know that id; substitute it yourself. The commands above need
     no such thing, because they address the new resource by name.
   {% endblocktrans %}
+  {% blocktrans trimmed %}
+    A <code>$…_FILE</code> in a command stands for a file on your own
+    machine. The dashboard uploaded the contents and the command line wants
+    a path, which only you know. The REST call beside it carries the real
+    contents and needs no substitution.
+  {% endblocktrans %}
 </div>
 {% endblock %}

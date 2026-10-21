@@ -36,6 +36,22 @@ from astrolabe import rules
 SECRET_ANYWHERE = re.compile(r"password|passwd|secret|token|credential", re.I)
 SECRET_WORD = re.compile(r"(^|_)(pass|key|auth)(_|$)", re.I)
 
+# The patterns above are deliberately coarse, because the cost of missing a
+# credential is a credential in a session and on a screenshot. A few field
+# names are caught by them and are not secrets at all, so they are named
+# here one by one. Exact match, never a substring and never a pattern: this
+# is a reviewed list of exceptions, not a second rule to reason about.
+#
+# Nothing goes in here that an operator would mind seeing on a screen. Note
+# which neighbours are absent: private_key, api_key and secret_key are all
+# caught by the same boundary rule as public_key, and all of them stay
+# caught. lock_password stays out too; it is only a checkbox, but it is not
+# worth spending the exception on.
+NOT_SECRET = frozenset([
+    "public_key",   # public by definition; the private half never appears
+    "key_type",     # an enum, ssh or x509
+])
+
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])")
 _SAFE_WORD = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
 _TABLE_ACTION = re.compile(r"^[a-z0-9_]+__[a-z0-9_]+(__|$)")
@@ -43,6 +59,8 @@ _TABLE_ACTION = re.compile(r"^[a-z0-9_]+__[a-z0-9_]+(__|$)")
 
 def is_secret(name):
     """Whether a field name looks like it carries a credential."""
+    if str(name) in NOT_SECRET:
+        return False
     # Split camelCase into underscore-separated words first, so boundary
     # matching also catches names like Nova's "adminPass".
     normalized = _CAMEL.sub(r"\1_\2", str(name))
@@ -317,6 +335,46 @@ def _names_subject(field, placed):
     return "" if field["flag"] else (placed or "")
 
 
+def _apply_contents(field, raw, parts, body):
+    """File content posted inline. See rules.contents().
+
+    The body gets what was submitted, because the API takes it that way.
+    The command gets the placeholder, because the CLI wants a path.
+    """
+    raw = _scalar(raw)
+    if _blank(raw):
+        return
+    parts += [field["flag"], field["path"]]
+    _put(body, field["api"], str(raw))
+
+
+def _apply_positional(field, raw, trailing, body):
+    """A trailing argument out of the submission. Returns what it named.
+
+    The first thing a command names is what the entry is about: the flavor
+    in "flavor create", the router in "router add subnet". Later ones
+    qualify it rather than replace it, which the caller arranges.
+    """
+    raw = _scalar(raw)
+    if _blank(raw):
+        return ""
+    trailing.append(shq(raw))
+    # api=None means this positional names some other resource rather than
+    # describing this one. See rules.arg().
+    if field["api"]:
+        _put(body, field["api"], str(raw))
+    return str(raw)
+
+
+def _apply_item(field, item, trailing, body):
+    """Whichever value of a repeating step's list this pass is on."""
+    if _blank(item):
+        return
+    trailing.append(shq(item))
+    if field["api"]:
+        _put(body, field["api"], str(item))
+
+
 def _apply_captured(field, captured, parts, trailing, body):
     """A resource named by the path rather than the form.
 
@@ -386,6 +444,9 @@ def _render(spec, fields, captured, item=None, creates=None):
         elif kind == "parent":
             _apply_parent(field, raw, parts, body, creates)
 
+        elif kind == "contents":
+            _apply_contents(field, raw, parts, body)
+
         elif kind == "captured":
             placed = _apply_captured(field, captured, parts, trailing, body)
             subject = subject or _names_subject(field, placed)
@@ -403,36 +464,22 @@ def _render(spec, fields, captured, item=None, creates=None):
             parts.append(field["flag"])
 
         elif kind == "positional":
-            raw = _scalar(raw)
-            if _blank(raw):
-                continue
-            trailing.append(shq(raw))
-            # api=None means this positional names some other resource
-            # rather than describing this one. See rules.arg().
-            if field["api"]:
-                _put(body, field["api"], str(raw))
-            # The first thing a command names is what the entry is about:
-            # the flavor in "flavor create", the router in "router add
-            # subnet". Later positionals qualify it rather than replace it.
-            subject = subject or str(raw)
+            # Called first and assigned second. "subject or f()" would skip
+            # the call once a subject was set, and with it the argument.
+            named = _apply_positional(field, raw, trailing, body)
+            subject = subject or named
 
         elif kind == "target":
             # Not from the submission: see rules.target(). It trails the
             # command and reaches the REST call through _endpoint, never
             # through the body.
             found = captured.get(field["field"])
-            if _blank(found):
-                continue
-            trailing.append(shq(found))
-            subject = subject or str(found)
+            if not _blank(found):
+                trailing.append(shq(found))
+                subject = subject or str(found)
 
         elif kind == "item":
-            # Whichever value of the step's ``per`` list this pass is on.
-            if _blank(item):
-                continue
-            trailing.append(shq(item))
-            if field["api"]:
-                _put(body, field["api"], str(item))
+            _apply_item(field, item, trailing, body)
 
     return parts + trailing, body, subject
 

@@ -61,7 +61,7 @@ from astrolabe import translate  # noqa: E402
 
 KINDS = {"value", "flag", "multi", "positional", "redacted",
          "choice", "target", "item", "lines", "pairs", "parent",
-         "captured"}
+         "captured", "contents"}
 
 
 def every_spec():
@@ -444,6 +444,37 @@ class TestReadFields(unittest.TestCase):
         }))
         self.assertEqual(list(fields), ["name"])
 
+    def test_the_allowlist_lets_through_exactly_what_it_names(self):
+        # Two field names are caught by the patterns and are not secrets.
+        # The point of this test is the second half: their neighbours, all
+        # caught by the same boundary rule, stay caught. An allowlist is
+        # only as safe as the names that are not on it.
+        kept = translate.read_fields(Post({
+            "public_key": "ssh-ed25519 AAAA me@laptop", "key_type": "ssh",
+        }))
+        self.assertEqual(sorted(kept), ["key_type", "public_key"])
+        for dangerous in ("private_key", "api_key", "secret_key", "ssh_key",
+                          "key", "auth_key", "lock_password", "password"):
+            with self.subTest(dangerous):
+                self.assertTrue(translate.is_secret(dangerous))
+
+    def test_the_allowlist_is_names_and_not_patterns(self):
+        # Exact match, so an entry cannot quietly widen into a rule. A
+        # longer name containing an allowed one is still a secret.
+        for near in ("my_public_key", "public_key_data", "PUBLIC_KEY"):
+            with self.subTest(near):
+                self.assertTrue(translate.is_secret(near))
+
+    def test_nothing_sits_on_the_allowlist_doing_nothing(self):
+        # An entry that the patterns would not have caught anyway is one
+        # nobody needs to review, and one more place to hide a mistake.
+        for name in translate.NOT_SECRET:
+            with self.subTest(name):
+                self.assertTrue(translate.SECRET_ANYWHERE.search(name) or
+                                translate.SECRET_WORD.search(name),
+                                "%r is not caught by the filter, so listing "
+                                "it as an exception says nothing" % name)
+
     def test_fields_that_merely_contain_a_secret_word_are_kept(self):
         fields = translate.read_fields(Post({
             "passthrough": "a", "monkey": "b", "keystone_url": "c",
@@ -751,6 +782,59 @@ class TestTranslate(unittest.TestCase):
         "availability_zone": "nova", "snapshot_source": "snap-1",
         "image_source": "img-1", "volume_source": "vol-9",
     }
+
+    def test_generating_a_key_pair_records_the_type_that_was_picked(self):
+        # Omitting --type would not be a shorter command, it would make an
+        # ssh key where the operator asked for a certificate.
+        for picked in ("ssh", "x509"):
+            with self.subTest(picked):
+                out = translate.translate(
+                    "/project/key_pairs/create",
+                    translate.read_fields({"name": ["web-key"],
+                                           "key_type": [picked]}))
+                self.assertEqual(
+                    cli(out),
+                    "openstack keypair create --type %s web-key" % picked)
+                self.assertEqual(out["calls"][0]["body"]["keypair"]["type"],
+                                 picked)
+
+    def test_generating_a_key_pair_passes_no_public_key(self):
+        # The absence is what tells both the CLI and Nova to generate one.
+        out = translate.translate("/project/key_pairs/create",
+                                  {"name": "web-key", "key_type": "ssh"})
+        self.assertNotIn("--public-key", cli(out))
+        self.assertNotIn("public_key", out["calls"][0]["body"]["keypair"])
+
+    def test_importing_a_key_names_a_file_and_sends_the_key(self):
+        # The two halves differ here, and each is right. Nova takes the key
+        # inline, so the REST call carries it. The CLI wants a path to a
+        # file on the operator's machine, which Astrolabe cannot know.
+        out = translate.translate(
+            "/project/key_pairs/import",
+            translate.read_fields({
+                "name": ["laptop"], "key_type": ["ssh"],
+                "public_key": ["ssh-ed25519 AAAAC3Nz me@laptop"]}))
+        self.assertEqual(
+            cli(out),
+            "openstack keypair create --type ssh "
+            "--public-key $PUBLIC_KEY_FILE laptop")
+        self.assertEqual(out["calls"][0]["body"]["keypair"]["public_key"],
+                         "ssh-ed25519 AAAAC3Nz me@laptop")
+
+    def test_import_and_generate_differ_only_by_the_key(self):
+        # Same command, same endpoint. Sending the public key is the whole
+        # difference between importing and generating, which is why the
+        # placeholder has to be there rather than be left off.
+        submitted = {"name": "k", "key_type": "ssh"}
+        generated = translate.translate("/project/key_pairs/create",
+                                        submitted)
+        imported = translate.translate(
+            "/project/key_pairs/import",
+            dict(submitted, public_key="ssh-ed25519 AAAA"))
+        self.assertEqual(generated["calls"][0]["url"],
+                         imported["calls"][0]["url"])
+        self.assertIn("--public-key", cli(imported))
+        self.assertNotIn("--public-key", cli(generated))
 
     def test_one_source_flag_however_many_selects_were_posted(self):
         # The reason this rule keys off volume_source_type rather than off

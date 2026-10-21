@@ -102,6 +102,17 @@ and ``auth`` match only on word boundaries, so ``passthrough`` and
 ``keystone_url`` survive. Names are split on camelCase first, so Nova's
 ``adminPass`` is caught too.
 
+The patterns are deliberately coarse, because the cost of missing a credential
+is a credential in a session and on a screenshot. Two field names they catch
+are not secrets at all, and those two are named one by one in ``NOT_SECRET``:
+``public_key``, which is public by definition, and ``key_type``, an enum of
+``ssh`` and ``x509``. Exact match, never a substring and never a pattern, so
+``my_public_key`` is still dropped. It is a reviewed list of exceptions rather
+than a second rule to reason about, and what is *absent* from it matters most:
+``private_key``, ``api_key``, ``secret_key`` and ``ssh_key`` are caught by the
+same boundary rule as ``public_key`` and all of them stay caught. Tests assert
+both halves.
+
 Nothing is sent anywhere. Entries live in the operator's session, capped, and
 disappear at logout.
 
@@ -141,6 +152,8 @@ Create subnet                  ``openstack subnet create``
 Create security group          ``openstack security group create``
 Add interface to router        ``openstack router add subnet``
 Allocate floating IP           ``openstack floating ip create``
+Create key pair                ``openstack keypair create``
+Import key pair                ``openstack keypair create --public-key``
 Create volume                  ``openstack volume create``
 Create volume snapshot         ``openstack volume snapshot create``
 Attach volume to instance      ``openstack server add volume``
@@ -585,6 +598,15 @@ branch does.
     through the body — an id identifies a resource rather than describing
     it, and Neutron rejects it as an attribute.
 
+``contents(field, flag, api, path)``
+    A value the API takes inline and the CLI reads out of a file. Horizon
+    posts the text of an SSH public key; ``keypair create`` wants a filename
+    to read it from. The REST call carries the real thing, because it can.
+    The command names ``path`` instead, a shell variable standing for a file
+    on the operator's own machine — a variable rather than a plausible-looking
+    path, so a command run without thinking fails loudly instead of reading
+    the wrong key.
+
 ``redacted(field, flag)``
     Stands in for a field Astrolabe refuses to read. The secret filter drops
     password-like names before the interpreter runs, so the rule emits a
@@ -856,6 +878,13 @@ Known limits
   out of ``SECURITY_GROUP_RULES``, a setting each deployment can change.
   Covering only the custom entries would leave an operator unable to tell
   which of their rules got recorded, so the panel is left out whole.
+* **Importing a key pair needs the file supplied.** The command comes out
+  as ``--public-key $PUBLIC_KEY_FILE``, because the CLI reads the key from
+  disk and the file is on your machine, not the server. Point the variable
+  at it before running. The ``curl`` beside it needs nothing: Nova takes the
+  key inline, so the REST call carries the real one. Worth not skipping,
+  because sending the key is the whole difference between importing and
+  generating, and the same command without it quietly makes a new key.
 * **A volume's group is not recorded.** The create form offers a generic
   volume group, and ``openstack volume create`` has no flag for one — only
   ``--consistency-group``, which is the older and different concept. The

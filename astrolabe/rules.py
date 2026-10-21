@@ -146,6 +146,22 @@ def pairs(field, flag, api, keys, api_keys=None, clear=None):
     }
 
 
+def contents(field, flag, api, path):
+    """A value the API takes inline and the CLI reads out of a file.
+
+    Horizon posts the text of an SSH public key; ``keypair create`` wants a
+    filename to read it from. The REST call can carry the real thing, so it
+    does. The command names ``path`` instead, a placeholder for a file on
+    the operator's own machine, which Astrolabe cannot know the name of and
+    which does not exist on the server in any case.
+
+    A shell variable rather than a plausible-looking path, so a command run
+    without thinking fails loudly instead of reading the wrong key.
+    """
+    return {"kind": "contents", "field": field, "flag": flag,
+            "api": api, "path": path}
+
+
 def captured(group, flag, api):
     """A value out of the URL that describes the thing being acted on.
 
@@ -383,6 +399,50 @@ FORMS = [
             # The form ships this ticked; only the private case needs a flag.
             boolean("is_public", "os-volume-type-access:is_public",
                     off="--private"),
+            arg("name"),
+        ],
+    },
+    {
+        "id": "keypair-create",
+        "title": "Create key pair",
+        # The panel de-angularization delivered most recently:
+        # key_pairs_panel defaults to the Django implementation now, so
+        # unlike roles these rules fire out of the box.
+        "url": r"/project/key_pairs/create/?$",
+        "form": PROJ + "key_pairs.forms:GenerateKeyPairForm",
+        "routes": ["horizon:project:key_pairs:create"],
+        "method": "POST",
+        "endpoint": COMPUTE + "/os-keypairs",
+        "envelope": "keypair",
+        "command": ["openstack", "keypair", "create"],
+        # No --public-key, which is what tells the CLI to generate one, and
+        # matches what this panel does. The private half comes back in the
+        # response and Astrolabe never sees a response, so there is nothing
+        # here to leak.
+        "fields": [
+            opt("key_type", "--type", api="type"),
+            arg("name"),
+        ],
+    },
+    {
+        "id": "keypair-import",
+        "title": "Import key pair",
+        "url": r"/project/key_pairs/import/?$",
+        "form": PROJ + "key_pairs.forms:ImportKeypair",
+        "routes": ["horizon:project:key_pairs:import"],
+        "method": "POST",
+        "endpoint": COMPUTE + "/os-keypairs",
+        "envelope": "keypair",
+        "command": ["openstack", "keypair", "create"],
+        # Same command and same endpoint as generating one. The public key
+        # is the whole difference: send it and Nova imports, omit it and
+        # Nova generates. So this is the one rule where a missing flag
+        # would not be an incomplete command but a different one, which is
+        # why the placeholder is not optional. See Known limits.
+        "fields": [
+            opt("key_type", "--type", api="type"),
+            contents("public_key", "--public-key", "public_key",
+                     "$PUBLIC_KEY_FILE"),
             arg("name"),
         ],
     },
