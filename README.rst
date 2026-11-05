@@ -701,9 +701,14 @@ adding a rule rather than checking flags by hand::
     >>> rules.verify_cli()   # [] when every command and flag still exists
     []
 
-If the declarative vocabulary cannot express a new panel, extend both
-``rules.py`` and ``translate.py``'s ``_apply_form`` together, and add a case to
-``tests/test_rules.py``.
+If the declarative vocabulary cannot express a new panel, add a field kind.
+That is a constructor in ``rules.py`` saying what the kind means, a handler
+in ``translate.py`` saying what it does, and one line registering the handler
+in ``_KINDS``. Handlers all take the field, whatever the submission holds
+under its name, and the command being built; they return what the field named
+where that is the thing the entry is about, and nothing otherwise. Two tests
+hold the two halves together, so a kind defined without a handler, or a
+handler no rule reaches, fails at rest rather than on a live submission.
 
 A rule covers whatever dashboards its form serves, which is usually one. Give
 a rule a second dashboard only when the same form class is behind both, as it

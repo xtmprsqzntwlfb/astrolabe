@@ -59,10 +59,6 @@ from astrolabe import rules  # noqa: E402
 from astrolabe import store  # noqa: E402
 from astrolabe import translate  # noqa: E402
 
-KINDS = {"value", "flag", "multi", "positional", "redacted",
-         "choice", "target", "item", "lines", "pairs", "parent",
-         "captured", "contents"}
-
 
 def every_spec():
     """(rule, spec) for every rule and every follow-up step it carries.
@@ -164,9 +160,20 @@ class TestRuleSet(unittest.TestCase):
                 self.assertIn(":", table["table"])
 
     def test_field_kinds_are_known(self):
+        # Asked of the interpreter's dispatch table rather than a list
+        # restated here. rules.py says what a kind means and translate.py
+        # says what it does, and a kind in one and not the other is a
+        # KeyError on the first submission to use it.
         for form, _spec, field in every_field():
             with self.subTest(form["id"], field=field["field"]):
-                self.assertIn(field["kind"], KINDS)
+                self.assertIn(field["kind"], translate._KINDS)
+
+    def test_no_field_kind_is_implemented_and_never_used(self):
+        # The other direction. A handler no rule reaches is untested code
+        # in the path every recording goes through, and the table is where
+        # that would hide.
+        used = {field["kind"] for _form, _spec, field in every_field()}
+        self.assertEqual(sorted(set(translate._KINDS) - used), [])
 
     #: Rules whose command takes more than one trailing argument, where the
     #: order they are written in is the order the CLI reads them. Listed so

@@ -213,87 +213,83 @@ def _endpoint(spec, captured, fields=None, item=None, creates=None):
     return url
 
 
-def _apply_value(field, raw, parts, body):
+class _Command:
+    """The command and body being built, and what a spec may read from.
+
+    Every field handler takes one of these, which is what lets the dispatch
+    below be a table. It used to be a chain of elifs, and it outgrew
+    Horizon's complexity limit once per field kind added -- four times,
+    each answered by lifting one more branch into a function of its own.
+    A table answers it once.
+    """
+
+    def __init__(self, spec, captured, item, creates):
+        #: The command so far, flags and all.
+        self.parts = list(spec["command"])
+        #: Trailing arguments, appended after the flags however they were
+        #: written. Among themselves they keep the order they appear in.
+        self.trailing = []
+        #: The REST body, before the rule's envelope goes round it.
+        self.body = {}
+        #: Named groups from the rule's url pattern.
+        self.captured = captured
+        #: The value a repeating step is on, or None.
+        self.item = item
+        #: Placeholder for the id of whatever the rule's first call
+        #: creates, or None. See rules.parent().
+        self.creates = creates
+
+
+def _apply_value(field, raw, out):
     """An ``opt``: a value behind a flag, with the rule's omissions applied.
 
-    Lifted out of _apply_form, which Horizon's flake8 complexity limit will
-    not hold otherwise. The two branchiest kinds live on their own.
-
-    Absent and empty are told apart here, and nowhere else: a field the form
-    never carried is skipped, while one the operator emptied is a clear if
-    the rule says so. _blank collapses the two, so this does not use it.
+    Absent and empty are told apart here, and nowhere else: a field the
+    form never carried is skipped, while one the operator emptied is a
+    clear if the rule says so. _blank collapses the two, so this does not
+    use it.
     """
     raw = _scalar(raw)
     if raw is None:
         return
     if raw == "":
-        # Only a rule that opted in acts on this: the same empty string is a
-        # deletion on an edit form and nothing at all on a create. shq
+        # Only a rule that opted in acts on this: the same empty string is
+        # a deletion on an edit form and nothing at all on a create. shq
         # renders it as '', which is what the CLI wants. See rules.opt().
         if field["clearable"]:
-            parts += [field["flag"], shq(raw)]
-            _put(body, field["api"], "")
+            out.parts += [field["flag"], shq(raw)]
+            _put(out.body, field["api"], "")
         return
     absent = field["absentWhen"]
     if absent is not None and str(raw) == str(absent):
         return
     omit = field["omitWhen"]
     if omit is None or str(raw) != str(omit):
-        parts += [field["flag"], shq(raw)]
+        out.parts += [field["flag"], shq(raw)]
     value = _cast(raw, field["cast"])
     if value is not None:
-        _put(body, field["api"], value)
+        _put(out.body, field["api"], value)
 
 
-def _apply_lines(field, raw, parts, body):
-    """A textarea read one value per line. See rules.lines()."""
-    values = _split_lines(raw)
-    if not values:
-        _apply_clear(field, parts, body)
-        return
-    for one in values:
-        parts += [field["flag"], shq(one)]
-    _put(body, field["api"], values)
+def _apply_boolean(field, raw, out):
+    """A checkbox: whichever side of it the rule names."""
+    on = _checked(raw)
+    if on and field["on"]:
+        out.parts.append(field["on"])
+    elif not on and field["off"]:
+        out.parts.append(field["off"])
+    _put(out.body, field["api"], on)
 
 
-def _apply_clear(field, parts, body):
-    """An emptied list field, where the rule says an empty one means clear.
-
-    Shared by the two list kinds. The CLI spells this with a flag of its
-    own rather than an empty value -- "--no-dns-nameservers" -- and Horizon
-    sends an empty list. A rule that did not ask for it emits nothing, the
-    way an empty box meant nothing before edit rules existed.
-    """
-    if field.get("clear"):
-        parts.append(field["clear"])
-        _put(body, field["api"], [])
-
-
-def _apply_pairs(field, raw, parts, body):
-    """A textarea read as named parts per line. See rules.pairs()."""
-    rows = []
-    for line in _split_lines(raw):
-        values = [bit.strip() for bit in line.split(",")]
-        spelled = ",".join("%s=%s" % (key, value)
-                           for key, value in zip(field["keys"], values))
-        parts += [field["flag"], shq(spelled)]
-        rows.append(dict(zip(field["apiKeys"], values)))
-    if not rows:
-        _apply_clear(field, parts, body)
-        return
-    _put(body, field["api"], rows)
-
-
-def _apply_multi(field, raw, parts, body):
+def _apply_multi(field, raw, out):
     """A multi-select, emitted as the flag once per value."""
     values = [str(one) for one in _as_list(raw) if not _blank(one)]
     for one in values:
-        parts += [field["flag"], shq(one)]
+        out.parts += [field["flag"], shq(one)]
     if values:
-        _put(body, field["api"], values)
+        _put(out.body, field["api"], values)
 
 
-def _apply_choice(field, raw, parts, body):
+def _apply_choice(field, raw, out):
     """A select where each option is its own flag.
 
     Anything not listed means "leave it to the server": Horizon's router
@@ -307,35 +303,50 @@ def _apply_choice(field, raw, parts, body):
     if picked["flag"]:
         # Split, because a flag may carry a fixed value: "--gateway none"
         # is two words to a shell.
-        parts += picked["flag"].split()
-    _put(body, field["api"], picked["value"])
+        out.parts += picked["flag"].split()
+    _put(out.body, field["api"], picked["value"])
 
 
-def _apply_parent(field, raw, parts, body, creates):
-    """The resource the first call created. See rules.parent().
+def _apply_clear(field, out):
+    """An emptied list field, where the rule says an empty one means clear.
 
-    The command names it, by the name the operator typed. The body cannot,
-    so it gets the placeholder instead -- and it gets it whether or not a
-    name was supplied, because the resource is created either way.
+    Shared by the two list kinds. The CLI spells this with a flag of its
+    own rather than an empty value -- "--no-dns-nameservers" -- and Horizon
+    sends an empty list. A rule that did not ask for it emits nothing, the
+    way an empty box meant nothing before edit rules existed.
     """
-    name = _scalar(raw)
-    if not _blank(name):
-        parts += [field["flag"], shq(name)]
-    if creates:
-        _put(body, field["api"], creates)
+    if field.get("clear"):
+        out.parts.append(field["clear"])
+        _put(out.body, field["api"], [])
 
 
-def _names_subject(field, placed):
-    """What a captured value contributes to the entry's title.
+def _apply_lines(field, raw, out):
+    """A textarea read one value per line. See rules.lines()."""
+    values = _split_lines(raw)
+    if not values:
+        _apply_clear(field, out)
+        return
+    for one in values:
+        out.parts += [field["flag"], shq(one)]
+    _put(out.body, field["api"], values)
 
-    Only when it is the command's trailing argument. Behind a flag it
-    qualifies the action rather than naming its subject: a snapshot entry
-    is about the snapshot, not the volume --volume points at.
-    """
-    return "" if field["flag"] else (placed or "")
+
+def _apply_pairs(field, raw, out):
+    """A textarea read as named parts per line. See rules.pairs()."""
+    rows = []
+    for line in _split_lines(raw):
+        values = [bit.strip() for bit in line.split(",")]
+        spelled = ",".join("%s=%s" % (key, value)
+                           for key, value in zip(field["keys"], values))
+        out.parts += [field["flag"], shq(spelled)]
+        rows.append(dict(zip(field["apiKeys"], values)))
+    if not rows:
+        _apply_clear(field, out)
+        return
+    _put(out.body, field["api"], rows)
 
 
-def _apply_contents(field, raw, parts, body):
+def _apply_contents(field, raw, out):
     """File content posted inline. See rules.contents().
 
     The body gets what was submitted, because the API takes it that way.
@@ -344,11 +355,35 @@ def _apply_contents(field, raw, parts, body):
     raw = _scalar(raw)
     if _blank(raw):
         return
-    parts += [field["flag"], field["path"]]
-    _put(body, field["api"], str(raw))
+    out.parts += [field["flag"], field["path"]]
+    _put(out.body, field["api"], str(raw))
 
 
-def _apply_positional(field, raw, trailing, body):
+def _apply_parent(field, raw, out):
+    """The resource the first call created. See rules.parent().
+
+    The command names it, by the name the operator typed. The body cannot,
+    so it gets the placeholder instead -- and it gets it whether or not a
+    name was supplied, because the resource is created either way.
+    """
+    name = _scalar(raw)
+    if not _blank(name):
+        out.parts += [field["flag"], shq(name)]
+    if out.creates:
+        _put(out.body, field["api"], out.creates)
+
+
+def _apply_redacted(field, raw, out):
+    """A field read_fields refused to read. See rules.redacted().
+
+    The value was dropped before it reached us, so there is nothing to
+    render and nothing to put in the body. The flag makes the command ask
+    for it instead.
+    """
+    out.parts.append(field["flag"])
+
+
+def _apply_positional(field, raw, out):
     """A trailing argument out of the submission. Returns what it named.
 
     The first thing a command names is what the entry is about: the flavor
@@ -357,52 +392,83 @@ def _apply_positional(field, raw, trailing, body):
     """
     raw = _scalar(raw)
     if _blank(raw):
-        return ""
-    trailing.append(shq(raw))
+        return
+    out.trailing.append(shq(raw))
     # api=None means this positional names some other resource rather than
     # describing this one. See rules.arg().
     if field["api"]:
-        _put(body, field["api"], str(raw))
+        _put(out.body, field["api"], str(raw))
     return str(raw)
 
 
-def _apply_item(field, item, trailing, body):
-    """Whichever value of a repeating step's list this pass is on."""
-    if _blank(item):
+def _apply_target(field, raw, out):
+    """The resource an edit is addressed to. See rules.target().
+
+    Not from the submission. It trails the command and reaches the REST
+    call through _endpoint, never through the body.
+    """
+    found = out.captured.get(field["field"])
+    if _blank(found):
         return
-    trailing.append(shq(item))
+    out.trailing.append(shq(found))
+    return str(found)
+
+
+def _apply_item(field, raw, out):
+    """Whichever value of a repeating step's list this pass is on."""
+    if _blank(out.item):
+        return
+    out.trailing.append(shq(out.item))
     if field["api"]:
-        _put(body, field["api"], str(item))
+        _put(out.body, field["api"], str(out.item))
 
 
-def _apply_captured(field, captured, parts, trailing, body):
+def _apply_captured(field, raw, out):
     """A resource named by the path rather than the form.
 
     An attribute of the thing being acted on rather than its identity, so
     it goes in the body. Behind a flag, or as a trailing argument where the
-    CLI wants one. Returns what it placed, for the entry's title.
-    See rules.captured().
+    CLI wants one. See rules.captured().
+
+    It names the entry only in the second case. Behind a flag it qualifies
+    the action instead: a snapshot entry is about the snapshot, not the
+    volume --volume points at.
     """
-    found = captured.get(field["field"])
+    found = out.captured.get(field["field"])
     if _blank(found):
-        return None
+        return
     if field["flag"]:
-        parts += [field["flag"], shq(found)]
+        out.parts += [field["flag"], shq(found)]
     else:
-        trailing.append(shq(found))
+        out.trailing.append(shq(found))
     if field["api"]:
-        _put(body, field["api"], str(found))
-    return str(found)
+        _put(out.body, field["api"], str(found))
+    return None if field["flag"] else str(found)
 
 
-def _apply_boolean(field, raw, parts, body):
-    """A checkbox: whichever side of it the rule names."""
-    on = _checked(raw)
-    if on and field["on"]:
-        parts.append(field["on"])
-    elif not on and field["off"]:
-        parts.append(field["off"])
-    _put(body, field["api"], on)
+#: Field kind to the function that renders it. A handler takes the field,
+#: whatever the submission holds under its name, and the command being
+#: built. It returns what the field named, where that is the thing the
+#: entry is about, and nothing otherwise.
+#:
+#: rules.py says what a kind means; this says what it does. A kind in one
+#: and not the other is a KeyError on the first submission to use it, which
+#: a layer 1 test turns into a failure at rest instead.
+_KINDS = {
+    "value": _apply_value,
+    "flag": _apply_boolean,
+    "multi": _apply_multi,
+    "choice": _apply_choice,
+    "lines": _apply_lines,
+    "pairs": _apply_pairs,
+    "contents": _apply_contents,
+    "parent": _apply_parent,
+    "redacted": _apply_redacted,
+    "positional": _apply_positional,
+    "target": _apply_target,
+    "item": _apply_item,
+    "captured": _apply_captured,
+}
 
 
 def _render(spec, fields, captured, item=None, creates=None):
@@ -418,70 +484,16 @@ def _render(spec, fields, captured, item=None, creates=None):
     only thing a two-positional command like ``aggregate add host`` has to
     go on.
     """
-    parts = list(spec["command"])
-    trailing = []
-    body = {}
+    out = _Command(spec, captured, item, creates)
     subject = ""
-
     for field in spec["fields"]:
         if not _gated(field, fields):
             continue
-        raw = fields.get(field["field"])
-        kind = field["kind"]
-
-        if kind == "value":
-            _apply_value(field, raw, parts, body)
-
-        elif kind == "flag":
-            _apply_boolean(field, raw, parts, body)
-
-        elif kind == "lines":
-            _apply_lines(field, raw, parts, body)
-
-        elif kind == "pairs":
-            _apply_pairs(field, raw, parts, body)
-
-        elif kind == "parent":
-            _apply_parent(field, raw, parts, body, creates)
-
-        elif kind == "contents":
-            _apply_contents(field, raw, parts, body)
-
-        elif kind == "captured":
-            placed = _apply_captured(field, captured, parts, trailing, body)
-            subject = subject or _names_subject(field, placed)
-
-        elif kind == "choice":
-            _apply_choice(field, raw, parts, body)
-
-        elif kind == "multi":
-            _apply_multi(field, raw, parts, body)
-
-        elif kind == "redacted":
-            # read_fields dropped the value before it reached us, so there is
-            # nothing to render and nothing to put in the body. The flag makes
-            # the command ask for it instead. See rules.redacted().
-            parts.append(field["flag"])
-
-        elif kind == "positional":
-            # Called first and assigned second. "subject or f()" would skip
-            # the call once a subject was set, and with it the argument.
-            named = _apply_positional(field, raw, trailing, body)
-            subject = subject or named
-
-        elif kind == "target":
-            # Not from the submission: see rules.target(). It trails the
-            # command and reaches the REST call through _endpoint, never
-            # through the body.
-            found = captured.get(field["field"])
-            if not _blank(found):
-                trailing.append(shq(found))
-                subject = subject or str(found)
-
-        elif kind == "item":
-            _apply_item(field, item, trailing, body)
-
-    return parts + trailing, body, subject
+        # Called first and kept second. "subject or handler(...)" would
+        # skip the call once a subject was set, and the field with it.
+        named = _KINDS[field["kind"]](field, fields.get(field["field"]), out)
+        subject = subject or named or ""
+    return out.parts + out.trailing, out.body, subject
 
 
 def _call(spec, body, captured, fields, item=None, creates=None):
