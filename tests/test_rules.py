@@ -926,6 +926,48 @@ class TestTranslate(unittest.TestCase):
             cli(out),
             "openstack volume create --size 1 --type ssd first")
 
+    def test_resetting_a_volume_status_posts_an_action(self):
+        # The panel for a volume wedged in "creating". Horizon calls it a
+        # status and the CLI calls it a state.
+        out = translate.translate("/admin/volumes/v-1/update_status",
+                                  {"status": "available"})
+        self.assertEqual(cli(out),
+                         "openstack volume set --state available v-1")
+        self.assertEqual(out["calls"][0]["body"],
+                         {"os-reset_status": {"status": "available"}})
+
+    def test_migrating_a_volume_quotes_the_backend_host(self):
+        # A Cinder host is "host@backend#pool", and an unquoted # would
+        # comment out the rest of the line.
+        out = translate.translate(
+            "/admin/volumes/v-1/migrate",
+            {"name": "data", "current_host": "old@lvm#pool",
+             "host": "new@lvm#pool", "force_host_copy": "on"})
+        self.assertEqual(
+            cli(out),
+            "openstack volume migrate --host 'new@lvm#pool' "
+            "--force-host-copy v-1")
+        self.assertEqual(out["calls"][0]["body"]["os-migrate_volume"],
+                         {"host": "new@lvm#pool", "force_host_copy": True})
+        # The two readonly fields shown for context are not sent.
+        self.assertNotIn("data", cli(out))
+
+    def test_migrating_without_a_host_copy_says_so_in_the_body(self):
+        out = translate.translate("/admin/volumes/v-1/migrate",
+                                  {"host": "new@lvm#pool"})
+        self.assertNotIn("--force-host-copy", cli(out))
+        self.assertIs(
+            out["calls"][0]["body"]["os-migrate_volume"]["force_host_copy"],
+            False)
+
+    def test_the_admin_volume_rules_claim_only_their_own_panels(self):
+        # The admin volumes panel also has a detail page and a manage page
+        # on neighbouring paths, and neither is recorded.
+        for path in ("/admin/volumes/v-1/", "/admin/volumes/manage/",
+                     "/admin/volumes/v-1/encryption_detail/"):
+            with self.subTest(path):
+                self.assertIsNone(translate.translate(path, {"name": "x"}))
+
     def test_editing_and_extending_a_volume_are_different_calls(self):
         # Both render "volume set", which is the CLI folding two Cinder
         # operations into one command. The REST halves are not alike: an

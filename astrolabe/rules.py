@@ -492,6 +492,47 @@ FORMS = [
         ],
     },
     {
+        "id": "volume-set-status",
+        "title": "Reset volume status",
+        # Admin dashboard only: this is the panel for a volume wedged in
+        # "creating" or "deleting", and the CLI calls it a state where
+        # Horizon calls it a status.
+        "url": r"/admin/volumes/(?P<id>[^/]+)/update_status/?$",
+        "form": ADMIN + "volumes.forms:UpdateStatus",
+        "routes": ["horizon:admin:volumes:update_status"],
+        "method": "POST",
+        "endpoint": VOLUME + "/volumes/{id}/action",
+        "envelope": "os-reset_status",
+        "command": ["openstack", "volume", "set"],
+        "fields": [
+            opt("status", "--state", api="status"),
+            target(),
+        ],
+    },
+    {
+        "id": "volume-migrate",
+        "title": "Migrate volume",
+        "url": r"/admin/volumes/(?P<id>[^/]+)/migrate/?$",
+        "form": ADMIN + "volumes.forms:MigrateVolume",
+        "routes": ["horizon:admin:volumes:migrate"],
+        "method": "POST",
+        "endpoint": VOLUME + "/volumes/{id}/action",
+        "envelope": "os-migrate_volume",
+        "command": ["openstack", "volume", "migrate"],
+        # name and current_host are shown readonly so the operator can see
+        # what they are moving, and neither is sent. uncovered() lists them.
+        #
+        # cinderclient also sends lock_volume, always false here because the
+        # form has no box for it. Left out rather than written as a constant:
+        # false is what Cinder assumes, so the request is the same one.
+        "fields": [
+            opt("host", "--host"),
+            boolean("force_host_copy", "force_host_copy",
+                    on="--force-host-copy"),
+            target(),
+        ],
+    },
+    {
         "id": "volume-update",
         "title": "Update volume",
         "url": r"/project/volumes/(?P<id>[^/]+)/update/?$",

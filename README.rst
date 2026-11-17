@@ -160,6 +160,8 @@ Attach volume to instance      ``openstack server add volume``
 Associate floating IP          ``openstack floating ip set --port``
 Edit volume                    ``openstack volume set``
 Extend volume                  ``openstack volume set --size``
+Migrate volume (admin)         ``openstack volume migrate``
+Reset volume status (admin)    ``openstack volume set --state``
 Edit volume type               ``openstack volume type set``
 Edit network                   ``openstack network set``
 Edit subnet                    ``openstack subnet set``
@@ -890,6 +892,13 @@ Known limits
   key inline, so the REST call carries the real one. Worth not skipping,
   because sending the key is the whole difference between importing and
   generating, and the same command without it quietly makes a new key.
+* **Managing and unmanaging a volume are not recorded.** Both panels
+  exist in the admin dashboard and neither has an ``openstack`` command to
+  render: the CLI has no ``volume manage`` or ``volume unmanage``, only the
+  older ``cinder`` client did. The REST calls exist, so these could be
+  recorded as ``curl`` alone, but every other entry carries both halves and
+  one that silently carried one would be the odd exception rather than an
+  obvious gap.
 * **A volume's group is not recorded.** The create form offers a generic
   volume group, and ``openstack volume create`` has no flag for one — only
   ``--consistency-group``, which is the older and different concept. The
